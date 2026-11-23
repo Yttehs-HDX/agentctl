@@ -99,6 +99,20 @@ Measured:
 | pi | yes (`app: pi`) | `idle` within ~8 s | same vocabulary |
 | claude 2.1.327 | yes (`app: claude-code`) | `blocked` with `kind: permission`, `msg: "trust this folder"` on a fresh directory | after `down enter` (trust) → `idle` |
 | codex 0.146.0 | **no** (`reported: false`, `status: null`) | — | agentctl shows `starting` for 90 s, then `unknown`; `wait` cannot be used as a turn barrier |
+
+Codex is **explicitly out of scope** for v0.1 (decision 2026-11-24): its trust
+and login dialogs swallow typed text while `hc send` still reports success, so
+any send-based workflow needs a delivery proof the agent does not provide. The
+catalog keeps `session_id="none"`, `supports_resume=false`; a codex session is
+`unknown` and unrecoverable by design rather than silently wrong. Findings kept
+for a later version:
+
+- a fresh `CODEX_HOME` starts a login flow, not a usable agent;
+- `hc` starts programs with the *core's* environment, so `CODEX_HOME=<private>`
+  set on the `hc` process never reaches the program — `env K=V cmd` in argv does;
+- rollouts (`~/.codex/sessions/<date>/rollout-<ts>-<uuid>.jsonl`) appear only
+  after the first real message and carry `session_meta.session_id`, which
+  `codex resume <id>` accepts and was measured to restore context.
 | opencode | not installed | — | [UNVERIFIED] |
 
 This is why agentctl stores `integration` per agent and maps "no status" to

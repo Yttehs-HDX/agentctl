@@ -78,6 +78,7 @@ class Session:
             "mode": self.mode,
             "hc_terminal_id": self.hc_terminal_id,
             "native_session_id": self.native_session_id,
+            "native_session_dir": self.native_session_dir,
             "worktree_path": self.worktree_path,
             "worktree_branch": self.worktree_branch,
             "runtime_started_at": self.runtime_started_at,

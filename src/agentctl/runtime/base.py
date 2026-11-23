@@ -1,0 +1,95 @@
+"""Runtime abstraction: what agentctl needs from a terminal substrate.
+
+The adapter is the only place that knows how a terminal is created, talked to
+and inspected. Business code holds `RuntimeAdapter` and opaque terminal ids.
+"""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
+from typing import Any
+
+
+@dataclass(slots=True)
+class TerminalInfo:
+    address: str
+    name: str | None
+    state: str  # live | finished
+    status: str | None  # idle | working | done | blocked | error | None
+    app: str | None
+    cwd: str
+    exit_code: int | None
+    reason: str | None
+    labels: dict[str, str] = field(default_factory=dict)
+    reported: bool = False
+    raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def live(self) -> bool:
+        return self.state == "live"
+
+
+@dataclass(slots=True)
+class ReadOutput:
+    text: str
+    complete: bool
+    how: str
+    why: str | None
+
+
+@dataclass(slots=True)
+class WaitOutcome:
+    ended: bool
+    reason: str
+    status: str | None
+    exit_code: int | None
+    turn: int
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
+class RuntimeAdapter(ABC):
+    """Terminal lifecycle for one runtime backend."""
+
+    @abstractmethod
+    def available(self) -> bool: ...
+
+    @abstractmethod
+    def version(self) -> str: ...
+
+    @abstractmethod
+    def create_terminal(
+        self,
+        argv: list[str],
+        *,
+        cwd: str,
+        name: str,
+        labels: dict[str, str] | None = None,
+        env: dict[str, str] | None = None,
+    ) -> TerminalInfo: ...
+
+    @abstractmethod
+    def send_input(self, terminal: str, text: str) -> dict[str, Any]: ...
+
+    @abstractmethod
+    def read_output(self, terminal: str, *, lines: int = 0) -> ReadOutput: ...
+
+    @abstractmethod
+    def get_terminal(self, terminal: str) -> TerminalInfo: ...
+
+    @abstractmethod
+    def find_terminal(self, terminal: str) -> TerminalInfo | None: ...
+
+    @abstractmethod
+    def list_terminals(
+        self, *, labels: dict[str, str] | None = None, include_finished: bool = False
+    ) -> list[TerminalInfo]: ...
+
+    @abstractmethod
+    def wait(self, terminal: str, *, timeout: float | None = None) -> WaitOutcome: ...
+
+    @abstractmethod
+    def kill(self, terminal: str) -> TerminalInfo: ...
+
+    @abstractmethod
+    def remove(self, terminal: str) -> None: ...

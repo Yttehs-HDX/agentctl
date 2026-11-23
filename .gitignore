@@ -12,3 +12,6 @@ wheels/
 
 # Virtual environments (uv)
 .venv
+
+# agentctl local state, if ever created inside a checkout
+.agentctl/

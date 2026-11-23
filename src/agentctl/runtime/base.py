@@ -29,6 +29,16 @@ class TerminalInfo:
     def live(self) -> bool:
         return self.state == "live"
 
+    @property
+    def is_local(self) -> bool:
+        """False for `hc`'s remote form `machine/t7`.
+
+        agentctl only ever creates local terminals, so a remote one carrying
+        our labels is somebody else's work: adopting it would type into another
+        machine and let `delete` kill a terminal we do not own.
+        """
+        return "/" not in self.address
+
 
 @dataclass(slots=True)
 class ReadOutput:

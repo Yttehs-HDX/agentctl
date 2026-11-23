@@ -75,14 +75,24 @@ class LifecycleManager:
     # ------------------------------------------------------------- discovery
 
     def find_terminal(self, session: Session) -> TerminalInfo | None:
-        """Locate the runtime terminal: by persisted id, then by label."""
+        """Locate this session's runtime terminal: by persisted id, then by label.
+
+        Only local terminals count. `hc` addresses remote ones as `machine/t7`,
+        and `hc ls` returns this machine's terminals first, so a remote terminal
+        that happens to carry our label must never be adopted: `send` would type
+        into another machine and `delete` would kill work we never started.
+        """
         if session.hc_terminal_id:
             terminal = self.runtime.find_terminal(session.hc_terminal_id)
-            if terminal is not None:
+            if terminal is not None and terminal.is_local:
                 return terminal
-        terminals = self.runtime.list_terminals(
-            labels={"agentctl.session": session.id}, include_finished=False
-        )
+        terminals = [
+            t
+            for t in self.runtime.list_terminals(
+                labels={"agentctl.session": session.id}, include_finished=False
+            )
+            if t.is_local
+        ]
         return terminals[0] if terminals else None
 
     def refresh(self, session: Session, *, persist: bool = True) -> Session:

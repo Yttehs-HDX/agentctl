@@ -12,12 +12,13 @@ from agentctl.config import default_config
 from agentctl.errors import RuntimeFailure
 from agentctl.runtime.base import RuntimeAdapter, TerminalInfo
 from agentctl.runtime.herdr_core import HerdrCoreAdapter
-from agentctl.session.lifecycle import derive_status
+from agentctl.session.lifecycle import LifecycleManager, derive_status
 from agentctl.session.service import CreateRequest, SessionService
 from agentctl.storage import Store, open_connection
 from agentctl.storage.models import Session
 from agentctl.workspace.resolver import WorkspaceResolver
 import agentctl.agents.detector as detector
+from agentctl.runtime.base import TerminalInfo as TermInfo
 
 
 def make_session(**overrides) -> Session:
@@ -242,3 +243,84 @@ def test_non_resumable_agent_is_marked_unreachable(live, workspace: Path, monkey
     target, outcome = service.recover(ws, "codexish")
     assert outcome == "unrecoverable"
     assert target.status == "unreachable"
+
+
+def test_remote_terminal_is_never_adopted(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`hc` addresses remote terminals as `machine/t7`.
+
+    Only this machine's terminals are agentctl's: a remote one carrying our
+    label is another machine's work. Adopting it would make `send` type there
+    and `delete` kill it.
+    """
+    session = make_session(hc_terminal_id=None)
+    remote = TerminalInfo(
+        address="boxb/t2",
+        name="imposter",
+        state="live",
+        status="idle",
+        app=None,
+        cwd="/tmp",
+        exit_code=None,
+        reason=None,
+        labels={"agentctl.session": session.id},
+    )
+    manager = LifecycleManager(store=None, runtime=_StubRuntime(find=None, listed=[remote]))
+    assert manager.find_terminal(session) is None
+
+
+def test_remote_address_is_never_trusted_as_persisted_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    session = make_session(hc_terminal_id="boxb/t1")
+    remote = TerminalInfo(
+        address="boxb/t1",
+        name="remote-only",
+        state="live",
+        status="idle",
+        app=None,
+        cwd="/tmp",
+        exit_code=None,
+        reason=None,
+    )
+    manager = LifecycleManager(store=None, runtime=_StubRuntime(find=remote, listed=[]))
+    assert manager.find_terminal(session) is None
+
+
+def test_local_terminal_is_still_found_among_remotes() -> None:
+    session = make_session(hc_terminal_id=None)
+    local = TerminalInfo(
+        address="t1",
+        name="ac-w-1",
+        state="live",
+        status="idle",
+        app="omp",
+        cwd="/tmp",
+        exit_code=None,
+        reason=None,
+        labels={"agentctl.session": session.id},
+    )
+    remote = TerminalInfo(
+        address="boxb/t1",
+        name="imposter",
+        state="live",
+        status="idle",
+        app=None,
+        cwd="/tmp",
+        exit_code=None,
+        reason=None,
+        labels={"agentctl.session": session.id},
+    )
+    manager = LifecycleManager(store=None, runtime=_StubRuntime(find=None, listed=[remote, local]))
+    found = manager.find_terminal(session)
+    assert found is not None
+    assert found.address == "t1"
+
+
+class _StubRuntime:
+    def __init__(self, *, find, listed):
+        self._find = find
+        self._listed = listed
+
+    def find_terminal(self, terminal):
+        return self._find
+
+    def list_terminals(self, *, labels=None, include_finished=False):
+        return list(self._listed)

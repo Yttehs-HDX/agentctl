@@ -113,6 +113,22 @@ Agent argv is built from the catalog entry plus the measured session-id flags:
 The grace window (90 s) is measured from `runtime_started_at`, which every
 relaunch resets, so a resumed session is not immediately judged broken.
 
+## Addresses: local vs remote
+
+`hc` addresses a terminal it manages on another machine as `machine/t7`
+(`hc run --on`). agentctl v0.1 only creates local terminals, so:
+
+- `TerminalInfo.is_local` is false for any address containing `/`;
+- terminal discovery (`find_terminal`, and therefore `send`, `read`, `delete`,
+  `recover`) ignores remote terminals — otherwise a remote terminal that
+  happens to carry the same `agentctl.session` label would be adopted: `send`
+  would type on another machine, `delete` would kill work agentctl never
+  started, and `recover` would silently rebind the session to it;
+- `info` reports only local terminals as orphans for the same reason.
+
+`hc ls` returns this machine's terminals first, then each connected machine's,
+so filtering by address is the only reliable discriminator.
+
 ## Recovery
 
 ```text

@@ -70,7 +70,10 @@ class WorkspaceService:
             except Exception:  # noqa: BLE001 - same reasoning
                 terminals = []
             known = {s.hc_terminal_id for s in sessions if s.hc_terminal_id}
-            orphans = [t.address for t in terminals if t.address not in known]
+            # Remote terminals (`machine/t7`) are never agentctl's: this
+            # process only creates local ones, so listing them as orphans would
+            # blame other machines' work on this workspace.
+            orphans = [t.address for t in terminals if t.is_local and t.address not in known]
         effective_default = workspace.default_agent or (
             self.config.defaults.agent if self.config is not None and self.config.defaults.agent else None
         )

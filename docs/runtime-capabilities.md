@@ -177,7 +177,24 @@ Methods of interest: `terminal.run/get/list/read/send/wait/kill/rm/label`,
 `server.status`, `events.subscribe`. v0.1 uses the CLI (simpler failure modes,
 same JSON shapes); the RPC surface is the documented upgrade path.
 
-## 10. Measurements added later
+## 10. Remote terminals (`--on`)
+
+`hc run --on <machine>` returns `machine/t7`, and `hc ls` mixes those into the
+same `terminals` array after the local ones. Measured with a second core on the
+same box (`hc machine add --via 'env HC_SESSION=other bash -c' --name boxb`):
+
+- verified: creation, `get`, `ls`, labels, `kill` all work with the prefixed
+  address;
+- a remote terminal carrying the same `agentctl.session` label sorts *after*
+  the local one, so index-based lookup is safe, but a lost local terminal makes
+  the remote one the only match — agentctl therefore rejects any address that
+  contains `/` instead of relying on order;
+- orphan detection must compare addresses as opaque strings; a bare-address
+  comparison would report `boxb/t2` as the local `t2`.
+
+agentctl v0.1 has no `--on` flag: `create_terminal` never passes it.
+
+## 11. Measurements added later
 
 - **pi resume**: `pi --session <id>` reloaded a real session (context counter
   went to 15k, the agent recalled a pre-kill code word). `pi --resume` with no

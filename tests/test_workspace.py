@@ -129,3 +129,73 @@ def test_rebind_refuses_a_root_owned_by_another_workspace(workspace: Path, tmp_p
         service.init(str(other))
         with pytest.raises(UsageError):
             service.rebind(mine, str(other))
+
+
+def test_orphans_exclude_remote_terminals(workspace: Path) -> None:
+    """A `machine/t7` terminal is never this workspace's orphan.
+
+    `hc ls` lists this machine's terminals first and then each connected
+    machine's; comparing bare addresses would report another machine's work as
+    this workspace's leftover.
+    """
+    from agentctl.runtime.base import TerminalInfo
+    from agentctl.workspace.service import WorkspaceService
+
+    class StubRuntime:
+        def available(self):
+            return True
+
+        def version(self):
+            return "test"
+
+        def list_terminals(self, *, labels=None, include_finished=False):
+            return [
+                TerminalInfo(
+                    address="t2",
+                    name="local-orphan",
+                    state="live",
+                    status="idle",
+                    app=None,
+                    cwd=str(workspace),
+                    exit_code=None,
+                    reason=None,
+                    labels=dict(labels or {}),
+                ),
+                TerminalInfo(
+                    address="boxb/t2",
+                    name="remote",
+                    state="live",
+                    status="idle",
+                    app=None,
+                    cwd=str(workspace),
+                    exit_code=None,
+                    reason=None,
+                    labels=dict(labels or {}),
+                ),
+            ]
+
+    with open_database() as conn:
+        store = Store(conn)
+        service = WorkspaceService(store, StubRuntime())
+        ws, _ = service.init(str(workspace))
+        info = service.info(ws)
+    assert info.orphan_terminals == ["t2"]
+
+
+def test_is_local_distinguishes_machine_addresses() -> None:
+    from agentctl.runtime.base import TerminalInfo
+
+    def make(address: str) -> TerminalInfo:
+        return TerminalInfo(
+            address=address,
+            name=None,
+            state="live",
+            status=None,
+            app=None,
+            cwd="/",
+            exit_code=None,
+            reason=None,
+        )
+
+    assert make("t7").is_local is True
+    assert make("boxb/t7").is_local is False

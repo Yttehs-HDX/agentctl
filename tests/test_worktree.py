@@ -11,7 +11,7 @@ from agentctl.config import default_config
 from agentctl.errors import InvalidPath
 from agentctl.runtime.herdr_core import HerdrCoreAdapter
 from agentctl.session.service import CreateRequest, SessionService
-from agentctl.session.worktree import worktree_is_clean
+from agentctl.session.worktree import _branch_slug, worktree_is_clean
 from agentctl.storage import Store, open_connection
 from agentctl.workspace.resolver import WorkspaceResolver
 import agentctl.agents.detector as detector
@@ -62,11 +62,12 @@ def test_worktree_is_created_inside_workspace(repo) -> None:
 def test_worktree_branch_is_recorded(repo) -> None:
     service, _store, ws, root = repo
     result = service.create(ws, CreateRequest(name="br", agent=None, cwd=str(root), mode="worktree"))
-    assert result.session.worktree_branch == "agentctl/br"
+    suffix = result.session.id.removeprefix("sess_")[:8]
+    assert result.session.worktree_branch == f"agentctl/br-{suffix}"
     branches = subprocess.run(
         ["git", "branch", "--list"], cwd=root, capture_output=True, text=True
     ).stdout
-    assert "agentctl/br" in branches
+    assert f"agentctl/br-{suffix}" in branches
 
 
 def test_worktree_dir_is_excluded_from_main_status(repo) -> None:
@@ -87,7 +88,7 @@ def test_delete_removes_clean_worktree_and_branch(repo) -> None:
     branches = subprocess.run(
         ["git", "branch", "--list"], cwd=root, capture_output=True, text=True
     ).stdout
-    assert "agentctl/clean" not in branches
+    assert result.session.worktree_branch not in branches
 
 
 def test_delete_keeps_worktree_with_uncommitted_work(repo) -> None:
@@ -134,3 +135,52 @@ def test_worktree_is_clean_detects_changes(repo) -> None:
     assert worktree_is_clean(path) is True
     (Path(path) / "new.txt").write_text("x")
     assert worktree_is_clean(path) is False
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "a..b",            # git rejects `..` anywhere in a ref
+        "foo.lock",        # git rejects a component ending in .lock
+        "@{now}",          # git rejects `@{`
+        ".hidden",         # git rejects a leading dot in a component
+        "x/y/z",           # nesting would create unrequested directories
+        "a:b", "a*b", "a?b", "a[b", "a\\b", "a~b", "a^b", "a b",
+        "-lead", "trail-", "....", "///",
+        "有 unicode",       # no ASCII left
+        "a" * 64,          # longer than any sensible ref component
+    ],
+)
+def test_branch_slug_is_always_a_valid_git_ref(name: str) -> None:
+    session_id = "sess_1a2b3c4d5e6f7a8b"
+    suffix = session_id.removeprefix("sess_")[:8]
+    branch = f"agentctl/{_branch_slug(name)[:48]}-{suffix}"
+    proc = subprocess.run(
+        ["git", "check-ref-format", "--branch", branch], capture_output=True, text=True
+    )
+    assert proc.returncode == 0, f"{name!r} produced invalid ref {branch!r}"
+    assert len(branch) <= 100
+
+
+def test_git_invalid_name_still_creates_a_worktree(repo) -> None:
+    """A `..` in the session name used to abort creation; it must not."""
+    service, _store, ws, root = repo
+    result = service.create(ws, CreateRequest(name="a..b", agent=None, cwd=str(root), mode="worktree"))
+    assert Path(result.session.worktree_path).is_dir()
+    assert result.session.worktree_branch is not None
+
+
+def test_recreated_name_does_not_collide_with_a_surviving_branch(repo) -> None:
+    """A kept (dirty) worktree leaves its branch behind; the name must still work."""
+    service, _store, ws, root = repo
+    first = service.create(ws, CreateRequest(name="reuse", agent=None, cwd=str(root), mode="worktree"))
+    (Path(first.session.worktree_path) / "dirty.txt").write_text("work\n")
+    service.delete(ws, "reuse")
+    branches = subprocess.run(
+        ["git", "branch", "--list"], cwd=root, capture_output=True, text=True
+    ).stdout
+    assert first.session.worktree_branch in branches
+
+    second = service.create(ws, CreateRequest(name="reuse", agent=None, cwd=str(root), mode="worktree"))
+    assert second.session.worktree_branch != first.session.worktree_branch
+    assert Path(second.session.worktree_path).is_dir()

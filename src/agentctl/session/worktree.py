@@ -47,18 +47,37 @@ def create_worktree(
     parent = worktree_root(workspace_root)
     parent.mkdir(parents=True, exist_ok=True)
     target = parent / session_id
-    branch = f"agentctl/{_branch_slug(session_name)}"
+    # The session suffix keeps the branch unique per repository: a name can be
+    # reused after a delete, and a kept worktree can keep its branch alive.
+    suffix = session_id.removeprefix("sess_")[:8]
+    branch = f"agentctl/{_branch_slug(session_name)[:48]}-{suffix}"
+    if not _valid_branch(branch):
+        raise WorktreeError(
+            f"cannot derive a valid git branch from session name {session_name!r}",
+            "rename the session using letters, digits, '.', '_' or '-'",
+        )
     args = ["git", "-C", repo_root, "worktree", "add", "-b", branch, str(target)]
     if base_ref:
         args.append(base_ref)
     proc = subprocess.run(args, capture_output=True, text=True)
     if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        message = detail[-1] if detail else f"git exited {proc.returncode}"
         raise WorktreeError(
-            f"git worktree add failed: {proc.stderr.strip() or proc.stdout.strip()}",
-            f"check that {repo_root} is a clean git repository",
+            f"git worktree add failed: {message}",
+            f"inspect `git -C {repo_root} worktree list` and `git -C {repo_root} branch --list`",
         )
     _exclude_worktree_dir(repo_root)
     return str(target), branch
+
+
+def _valid_branch(branch: str) -> bool:
+    proc = subprocess.run(
+        ["git", "check-ref-format", "--branch", branch],
+        capture_output=True,
+        text=True,
+    )
+    return proc.returncode == 0
 
 
 def worktree_is_clean(path: str) -> bool:
@@ -74,9 +93,22 @@ def worktree_is_clean(path: str) -> bool:
 
 
 def _branch_slug(name: str) -> str:
-    """Session names are free-form; git refs are not."""
-    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")
-    return slug or "session"
+    """Session names are free-form; git refs are not.
+
+    Rules enforced (git-check-ref-format):
+    - no `..`, no `@{`, no leading/trailing `/` or `.`
+    - no component ending in `.lock`, no control chars, no space `~^:?*[\\`
+    - each `/`-separated component must not start with `.`
+    """
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name)
+    slug = re.sub(r"\.{2,}", ".", slug)  # `a..b` is rejected by git
+    slug = re.sub(r"@\{", "-", slug)
+    slug = slug.strip("-./")
+    if slug.endswith(".lock"):
+        slug = slug[: -len(".lock")].rstrip("-.")
+    if not slug:
+        return "session"
+    return slug
 
 
 def remove_worktree(*, repo_root: str, path: str, branch: str | None) -> None:

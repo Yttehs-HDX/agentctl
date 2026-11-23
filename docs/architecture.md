@@ -70,7 +70,7 @@ agent_catalog(id PK, command_json, enabled, capabilities_json, updated_at)
 2  enforce unique name in this workspace
 3  resolve agent:  --agent → workspace default → global default → error
 4  validate cwd: realpath, exists, is a dir, inside workspace root
-5  mode == worktree ? git worktree add -b agentctl/<name> .agentctl/worktrees/<id>
+5  mode == worktree ? git worktree add -b agentctl/<slug>-<id8> .agentctl/worktrees/<id>
 6  insert the registry row (status=starting)
 7  hc run --bg --json --no-parent --name ac-<slug>-<id6> --cwd <cwd> \
         --label agentctl.workspace=... --label agentctl.session=... -- <argv>
@@ -145,6 +145,12 @@ action, and even then the row is soft-deleted.
 - Worktrees live in `<workspace>/.agentctl/worktrees/<session id>` and are
   excluded through `.git/info/exclude`, so `git status` in the main checkout
   stays clean.
+- Branch names are `agentctl/<slug>-<first 8 hex of the session id>`. The slug
+  is reduced to characters git accepts (`..`, `.lock`, `@{`, leading dots and
+  `~^:?*[\` are normalised away) and the id suffix keeps names unique per
+  repository, so a reused session name never collides with a branch left
+  behind by a kept worktree. The final ref is checked with
+  `git check-ref-format` before use.
 - Deletion removes a worktree only when it is clean; uncommitted worker output
   is project data, so the worktree is kept and the reason is recorded in the
   session's `last_error`.

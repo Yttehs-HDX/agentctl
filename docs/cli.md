@@ -82,7 +82,8 @@ agentctl --workspace PATH create --name NAME --cwd DIR
   neither exists the command fails and asks for `--agent`.
 - `--mode` defaults to `session.default_mode` (shipped as `shared`).
   `worktree` requires a git repository and creates
-  `.agentctl/worktrees/<session id>` on branch `agentctl/<name>`.
+  `.agentctl/worktrees/<session id>` on branch
+  `agentctl/<slug>-<session id prefix>`.
 
 Prints the session id, agent, cwd, mode and terminal address.
 

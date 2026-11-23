@@ -47,6 +47,20 @@ def test_missing_binary_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
         resolve(default_config(), "pi")
 
 
+def test_resumable_agents_declare_a_flag() -> None:
+    for agent_id, definition in AGENT_DEFINITIONS.items():
+        if definition.supports_resume:
+            assert definition.resume_flag, agent_id
+
+
+def test_pi_resumes_with_session_not_resume() -> None:
+    """`pi --resume` opens a picker and restores nothing; `--session <id>` loads.
+
+    Measured live; a picker flag here would make recovery hang in a TUI.
+    """
+    assert definition_for("pi").resume_flag == "--session"
+
+
 def test_capabilities_are_declared_per_agent() -> None:
     omp = definition_for("omp")
     codex = definition_for("codex")

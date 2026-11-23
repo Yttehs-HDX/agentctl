@@ -338,6 +338,27 @@ def _print_sessions(sessions) -> None:
 
 
 @app.command()
+def rebind(
+    ctx: typer.Context,
+    new_root: Annotated[str, typer.Argument(help="New canonical root for this workspace identity.")],
+) -> None:
+    """Move this workspace identity to another directory (explicit migration)."""
+    state = _state(ctx)
+    with _open(state) as (config, store, runtime):
+        service = WorkspaceService(store, runtime, config)
+        workspace = service.require(state.root())
+        target = resolve_root(new_root)
+        before = workspace.root_path
+        moved = service.rebind(workspace, target)
+        state.emit(
+            {"workspace": moved.to_dict(), "previous_root": before},
+            lambda: typer.echo(
+                f"workspace {moved.id} moved\n  from: {before}\n  to:   {moved.root_path}"
+            ),
+        )
+
+
+@app.command()
 def create(
     ctx: typer.Context,
     name: Annotated[str, typer.Option("--name", "-n", help="Session name, unique in this workspace.")],

@@ -97,3 +97,35 @@ def test_dotdot_escape_is_canonicalised_away(workspace: Path) -> None:
     resolved = os.path.realpath(str(workspace / ".." / "elsewhere"))
     assert str(escaped) == resolved
     assert not is_inside(resolved, str(workspace))
+
+
+def test_rebind_moves_identity_without_changing_ids(workspace: Path, tmp_path: Path) -> None:
+    from agentctl.errors import UsageError
+    from agentctl.workspace.service import WorkspaceService
+
+    moved = tmp_path / "moved"
+    moved.mkdir()
+    with open_database() as conn:
+        store = Store(conn)
+        service = WorkspaceService(store, runtime=None)
+        original, _ = service.init(str(workspace))
+        before = (original.id, original.leader_id)
+        service.rebind(original, str(moved))
+        after, created = service.init(str(moved))
+    assert (after.id, after.leader_id) == before
+    assert created is False
+    assert after.root_path == str(moved)
+
+
+def test_rebind_refuses_a_root_owned_by_another_workspace(workspace: Path, tmp_path: Path) -> None:
+    from agentctl.errors import UsageError
+    from agentctl.workspace.service import WorkspaceService
+
+    other = tmp_path / "other"
+    other.mkdir()
+    with open_database() as conn:
+        service = WorkspaceService(Store(conn), runtime=None)
+        mine, _ = service.init(str(workspace))
+        service.init(str(other))
+        with pytest.raises(UsageError):
+            service.rebind(mine, str(other))

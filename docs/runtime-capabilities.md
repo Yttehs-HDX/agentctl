@@ -98,7 +98,7 @@ Measured:
 | omp 19.1.0 | yes (`app: omp`) | `idle` within ~6 s | `idle → working → done` per turn; `turn` increments |
 | pi | yes (`app: pi`) | `idle` within ~8 s | same vocabulary |
 | claude 2.1.327 | yes (`app: claude-code`) | `blocked` with `kind: permission`, `msg: "trust this folder"` on a fresh directory | after `down enter` (trust) → `idle` |
-| codex 0.146.0 | **no** (`reported: false`, `status: null`) | — | `wait` cannot be used as a turn barrier |
+| codex 0.146.0 | **no** (`reported: false`, `status: null`) | — | agentctl shows `starting` for 90 s, then `unknown`; `wait` cannot be used as a turn barrier |
 | opencode | not installed | — | [UNVERIFIED] |
 
 This is why agentctl stores `integration` per agent and maps "no status" to
@@ -110,9 +110,9 @@ and is a human decision point (send refuses without `--force`).
 | agent | how agentctl pins/learns the id | resume |
 | --- | --- | --- |
 | omp | `omp --session-dir <private dir>`; the CLI writes `<dir>/<ts>_<uuid>.jsonl` and the uuid is the session id | `omp --session-dir <dir> --resume <uuid>` — verified: restored the earlier turn's context |
-| pi | `pi --session-dir <dir>` (file naming id) and `--session-id <id>` | `pi --resume <id>` |
-| claude | `claude --session-id <uuid>` stores `~/.claude/projects/<cwd-slug>/<uuid>.jsonl` with that exact id | `claude --resume <uuid>` |
-| codex | no launch-time id pin; rollouts are `~/.codex/sessions/<date>/rollout-<ts>-<uuid>.jsonl` | `codex resume <id>` exists, but binding a *new* terminal to a known id at launch was **[UNVERIFIED]** without a picker |
+| pi | `pi --session-id <uuid>` creates the session under that id (verified: file named `<ts>_<uuid>.jsonl`) | `pi --session <id>` — verified, restored context. **`pi --resume` without an id only opens a picker and restores nothing** (observed: empty context, "No sessions in current folder") |
+| claude | `claude --session-id <uuid>` stores `~/.claude/projects/<cwd-slug>/<uuid>.jsonl` with that exact id | `claude --resume <uuid>` — verified: after a terminal kill+rm, recovered agent answered the pre-kill code word correctly |
+| codex | no launch-time id pin; rollouts are `~/.codex/sessions/<date>/rollout-<ts>-<uuid>.jsonl` | `codex resume <id>` exists, but binding a *new* terminal to a known id at launch was **[UNVERIFIED]** without a picker. A send to a codex TUI is delivered and echoed, but the TUI may then fail on its own model config (observed: `model_not_found` 400) — not an agentctl send failure |
 
 Consequence for v0.1: codex sessions get `native_session_id = NULL` and
 `supports_resume = false` in the catalog, and their status is `unknown`.
@@ -162,3 +162,21 @@ one process (`terminal.get`, then `terminal.list`, each answered by `id`).
 Methods of interest: `terminal.run/get/list/read/send/wait/kill/rm/label`,
 `server.status`, `events.subscribe`. v0.1 uses the CLI (simpler failure modes,
 same JSON shapes); the RPC surface is the documented upgrade path.
+
+## 10. Measurements added later
+
+- **pi resume**: `pi --session <id>` reloaded a real session (context counter
+  went to 15k, the agent recalled a pre-kill code word). `pi --resume` with no
+  id opened the session picker with an empty context — the catalog now uses
+  `--session`.
+- **claude resume**: after `hc kill` + `hc rm`, `claude --resume <uuid>` in a
+  fresh terminal restored the conversation; the agent answered the pre-kill
+  code word correctly.
+- **codex send**: input is delivered and echoed in the TUI transcript, but the
+  TUI itself then failed with `model_not_found` (400) for the configured model
+  on this account. That is the agent's own configuration, not a lost message.
+- **concurrency**: two simultaneous `create` calls for the same name produced
+  exactly one session and one clear conflict; eight parallel creates all
+  landed and `PRAGMA integrity_check` returned `ok` with `journal_mode=wal`.
+- **orphan detection**: a terminal labelled `agentctl.workspace=<id>` without a
+  registry row shows up under `info` → `orphans`.

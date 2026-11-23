@@ -52,6 +52,7 @@ the same sessions and the same terminals.
 | `setup [--default-agent ID] [--force]` | One-time machine setup |
 | `init` | Create/load the workspace identity for `--workspace` (idempotent) |
 | `info` | Workspace id, leader id, counts, default agent, runtime status |
+| `rebind NEW` | Move this workspace identity to another directory |
 | `list [--all]` | Sessions of this workspace |
 | `create --name N --cwd DIR [--agent ID] [--mode shared\|worktree] [--base-ref REF]` | New worker session |
 | `delete NAME [--keep-worktree]` | Kill the agent, clean the terminal, retire the record |

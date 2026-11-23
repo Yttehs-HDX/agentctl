@@ -227,8 +227,9 @@ def test_recover_resumes_from_native_id(live, workspace: Path, monkeypatch: pyte
     monkeypatch.setattr(service.runtime, "create_terminal", spy)
     target, outcome = service.recover(ws, "resumable")
     assert outcome == "resumed"
+    # omp resumes with --resume <id>; the flag must be followed by the id.
     assert "--resume" in calls[0]
-    assert native in calls[0]
+    assert calls[0][calls[0].index("--resume") + 1] == native
     assert target.hc_terminal_id
 
 

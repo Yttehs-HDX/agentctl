@@ -50,6 +50,17 @@ agentctl --workspace PATH init
 Creates the workspace identity (or reports the existing one). Idempotent: the
 workspace id and leader id never change for the same canonical path.
 
+## rebind
+
+```text
+agentctl --workspace OLD rebind NEW
+```
+
+Explicitly moves the workspace identity to another directory. The workspace id
+and leader id are unchanged, sessions follow, and the old root stops resolving.
+Refuses a target that belongs to another workspace. Directory moves are never
+detected automatically.
+
 ## info
 
 ```text

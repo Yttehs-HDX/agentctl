@@ -35,7 +35,8 @@ class AgentDefinition:
     session_id_flag: str | None = None
     # Flag that points the agent at a private session directory.
     session_dir_flag: str | None = None
-    # Flag that resumes a stored session by id.
+    # Flag that loads a stored session by id. Bare picker-opening forms are not
+    # used: `pi --resume` without an id opens a picker, `pi --session <id>` loads.
     resume_flag: str | None = None
     notes: str = ""
     resume_verified: bool = False
@@ -61,10 +62,11 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         session_id="explicit",
         session_id_flag="--session-id",
         session_dir_flag="--session-dir",
-        resume_flag="--resume",
+        # pi --resume (bare) opens a picker; --session <id> loads directly.
+        resume_flag="--session",
         supports_resume=True,
         resume_verified=True,
-        notes="accepts a caller-chosen --session-id; reports status",
+        notes="accepts a caller-chosen --session-id; --session <id> reloads it",
     ),
     "claude": AgentDefinition(
         id="claude",

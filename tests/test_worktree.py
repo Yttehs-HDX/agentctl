@@ -184,3 +184,25 @@ def test_recreated_name_does_not_collide_with_a_surviving_branch(repo) -> None:
     second = service.create(ws, CreateRequest(name="reuse", agent=None, cwd=str(root), mode="worktree"))
     assert second.session.worktree_branch != first.session.worktree_branch
     assert Path(second.session.worktree_path).is_dir()
+
+
+def test_base_ref_selects_the_starting_commit(repo) -> None:
+    service, _store, ws, root = repo
+    git("tag", "marker", cwd=root)
+    (root / "a.txt").write_text("after marker\n")
+    git("commit", "-aqm", "later", cwd=root)
+    result = service.create(
+        ws, CreateRequest(name="based", agent=None, cwd=str(root), mode="worktree", base_ref="marker")
+    )
+    assert (Path(result.session.worktree_path) / "a.txt").read_text() == "hello\n"
+
+
+def test_bad_base_ref_is_reported(repo) -> None:
+    from agentctl.session.worktree import WorktreeError
+
+    service, store, ws, root = repo
+    with pytest.raises(WorktreeError):
+        service.create(
+            ws, CreateRequest(name="bad", agent=None, cwd=str(root), mode="worktree", base_ref="nosuchref")
+        )
+    assert store.sessions.find_in_workspace(ws.id, "bad") is None

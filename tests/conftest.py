@@ -70,19 +70,23 @@ if cmd == "--version":
 
 if cmd == "run":
     name = args[args.index("--name") + 1]
+    assert "--no-parent" in args or "--parent" in args, "run must state its parentage"
     cwd = args[args.index("--cwd") + 1]
+    parent = args[args.index("--parent") + 1] if "--parent" in args else None
     argv = args[args.index("--") + 1:]
-    address = f"t{{len(state['terminals']) + 1}}"
     labels = {{}}
     for i, a in enumerate(args):
         if a == "--label":
             k, v = args[i + 1].split("=", 1)
             labels[k] = v
     body = {{
-        "address": address, "name": name, "cwd": cwd, "argv": argv,
+        "address": f"t{{len(state['terminals']) + 1}}", "name": name, "cwd": cwd, "argv": argv,
         "state": "live", "status": {{"state": "idle", "app": argv[0]}},
         "labels": labels, "exit_code": None, "reason": None, "reported": True,
+        "parent": parent,
+        "die_with_parent": not ("--outlive-parent" in args),
     }}
+    address = body["address"]
     state["terminals"][name] = body
     state_path.write_text(json.dumps(state))
     emit({{"address": address, "name": name, "cwd": cwd, "state": "live", "agent": argv[0], "turn": 0}})
@@ -126,7 +130,27 @@ if cmd == "send":
         emit({{"error": {{"kind": "not_found", "message": "nope"}}}}, 1)
     state.setdefault("sent", []).append({{"terminal": term, "text": text}})
     state_path.write_text(json.dumps(state))
-    emit({{"started": True, "status": "idle", "turn": 1}})
+    body = {{"started": state.get("send_started", True), "status": "idle", "turn": 1}}
+    if "--wait" in args:
+        body["wait"] = {{"ended": True, "reason": "status", "status": "done",
+                         "turn": 2, "exit_code": None}}
+    emit(body)
+
+if cmd == "label":
+    term = args[1] if args[1] != "--json" else args[2]
+    body = find(term)
+    if body is None:
+        print(json.dumps({{"error": {{"kind": "not_found", "message": f"no terminal {{term}}"}}}}), file=sys.stderr)
+        raise SystemExit(3)
+    pairs = args[2:] if args[1] != "--json" else args[3:]
+    for pair in pairs:
+        k, _, v = pair.partition("=")
+        if v:
+            body["labels"][k] = v
+        else:
+            body["labels"].pop(k, None)
+    state_path.write_text(json.dumps(state))
+    emit(body)
 
 if cmd == "keys":
     term = args[2]
@@ -149,6 +173,27 @@ if cmd == "read":
     emit({{"text": "screen for " + term, "complete": True, "how": "screen", "why": None}})
 
 if cmd == "wait":
+    if "--children" in args:
+        mode = args[args.index("--children") + 1]
+        parent = None
+        for i, a in enumerate(args):
+            if not a.startswith("-") and i > 0 and args[i - 1] != "--children" and a != mode:
+                if a != "wait":
+                    parent = a
+        children = {{}}
+        for body in state["terminals"].values():
+            if parent is None or body.get("parent") == parent:
+                children[body["address"]] = {{
+                    "terminal": body["address"],
+                    "ended": False,
+                    "reason": "running",
+                    "status": (body.get("status") or {{}}).get("state"),
+                    "exit_code": None,
+                    "turn": body.get("turn", 0),
+                    "children": [],
+                }}
+        emit({{"terminal": parent, "ended": True, "reason": "children", "status": None,
+               "exit_code": None, "turn": 0, "children": list(children.values())}})
     emit({{"terminal": args[-1], "ended": True, "reason": "status", "status": "done", "exit_code": None, "turn": 1, "children": []}})
 
 if cmd == "server":

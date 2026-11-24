@@ -6,8 +6,7 @@ import sys
 import time
 from dataclasses import dataclass
 
-from agentctl.agents.definitions import AGENT_DEFINITIONS
-from agentctl.errors import DeliveryUnconfirmed, RuntimeFailure, UsageError
+from agentctl.errors import RuntimeFailure, UsageError
 from agentctl.runtime.base import ReadOutput, RuntimeAdapter, WaitOutcome
 from agentctl.session.lifecycle import LifecycleManager
 from agentctl.storage.models import Session
@@ -17,12 +16,21 @@ DEFAULT_READY_TIMEOUT = 15.0
 
 @dataclass(slots=True)
 class SendReport:
+    """What Herdr reported about one send.
+
+    `started` is Herdr's own answer to "did this start a turn": `False` means the
+    text was accepted but the agent did not begin working (still booting, or a
+    dialog is up), which is the honest form of a delivery doubt. There is no
+    per-message acknowledgement to invent, and agentctl does not pretend to have
+    one.
+    """
+
     session: str
     terminal: str
     started: bool | None
     status: str | None
     turn: int
-    confirmed: bool
+    wait: dict[str, object] | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -31,7 +39,7 @@ class SendReport:
             "started": self.started,
             "status": self.status,
             "turn": self.turn,
-            "confirmed": self.confirmed,
+            "wait": self.wait,
         }
 
 
@@ -91,45 +99,39 @@ class MessagingService:
         session: Session,
         text: str,
         *,
-        ready_timeout: float = DEFAULT_READY_TIMEOUT,
         force: bool = False,
+        wait: bool = False,
+        timeout: float | None = None,
     ) -> SendReport:
+        """Type text into a session, letting Herdr own delivery and its guard.
+
+        Herdr refuses a blocked agent and can wait for readiness; agentctl's only
+        additions are identity (session → terminal) and passing `--wait` through,
+        so `started: false` surfaces as a doubt instead of a silent success.
+        """
         address = self._terminal_address(session)
-        definition = AGENT_DEFINITIONS.get(session.agent)
-        integration = bool(definition and definition.integration)
-        confirmed = False
-        if not force:
-            if not integration:
-                raise DeliveryUnconfirmed(
-                    f"agent {session.agent!r} does not report status, so delivery cannot be confirmed",
-                    "pass --force to type anyway, or use an agent that reports status",
-                )
-            # A send to a booting agent can be dropped; wait for its first report.
-            self.lifecycle.wait_until_ready(session, timeout=ready_timeout)
-            terminal = self.lifecycle.find_terminal(session)
-            if terminal is None or not terminal.live:
-                raise RuntimeFailure(
-                    f"session {session.name!r} stopped before it could accept input",
-                    "run `agentctl status`, then create a new session",
-                )
-            address = terminal.address
-            if not terminal.reported:
-                raise DeliveryUnconfirmed(
-                    f"session {session.name!r} reported no status within {ready_timeout:g}s",
-                    f"run `agentctl read {session.name}`, answer any dialog with "
-                    f"`agentctl keys {session.name} ...`, then retry; `--force` types anyway "
-                    "and may submit the dialog's selected option",
-                )
-            confirmed = True
-        result = self.runtime.send_input(address, text, force=force)
+        body = self.runtime.send_input(address, text, force=force, wait=wait, timeout=timeout)
+        turn_result = body.get("wait") if isinstance(body.get("wait"), dict) else None
         return SendReport(
             session=session.name,
             terminal=address,
-            started=result.get("started"),
-            status=result.get("status"),
-            turn=int(result.get("turn") or 0),
-            confirmed=confirmed,
+            started=body.get("started"),
+            status=body.get("status"),
+            turn=int(body.get("turn") or 0),
+            wait=turn_result,
         )
+
+    def wait_children(
+        self, *, leader, mode: str = "any", timeout: float | None = None
+    ) -> WaitOutcome:
+        """Wait on this workspace's Workers through Herdr's children wait.
+
+        `parent` is the Leader's terminal when one is bound, so an outside Leader
+        waits on the same children a Leader inside Herdr would. Herdr decides when
+        a child is done, from its own turn counter.
+        """
+        parent = leader.terminal if leader is not None else None
+        return self.runtime.wait_children(parent=parent, mode=mode, timeout=timeout)
 
     def keys(self, session: Session, keys: list[str]) -> KeyReport:
         if not keys:

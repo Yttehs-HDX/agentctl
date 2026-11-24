@@ -6,22 +6,16 @@ import sqlite3
 from contextlib import contextmanager
 
 from agentctl.paths import database_path
-from agentctl.storage.database import connect, initialize
+from agentctl.storage.database import SCHEMA_VERSION, connect, initialize, transaction
 from agentctl.storage.repository import (
-    ConsumerOffsetRepository,
-    EventRepository,
-    InboxRepository,
-    IntegrationRepository,
-    LeaseRepository,
-    MessageRepository,
-    OutboxRepository,
+    LeaderRepository,
     SessionRepository,
     WorkspaceRepository,
 )
 
 
 def open_connection(path=None) -> sqlite3.Connection:
-    """A ready connection; creates the file and schema on first use."""
+    """A ready connection; creates the file and migrates it on first use."""
     conn = connect(path or database_path())
     try:
         initialize(conn)
@@ -48,10 +42,13 @@ class Store:
         self.conn = conn
         self.workspaces = WorkspaceRepository(conn)
         self.sessions = SessionRepository(conn)
-        self.leases = LeaseRepository(conn)
-        self.messages = MessageRepository(conn)
-        self.events = EventRepository(conn)
-        self.inbox = InboxRepository(conn)
-        self.outbox = OutboxRepository(conn)
-        self.offsets = ConsumerOffsetRepository(conn)
-        self.integrations = IntegrationRepository(conn)
+        self.leaders = LeaderRepository(conn)
+
+
+__all__ = [
+    "SCHEMA_VERSION",
+    "Store",
+    "open_connection",
+    "open_database",
+    "transaction",
+]

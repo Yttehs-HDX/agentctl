@@ -1,17 +1,19 @@
-"""Leader lease and fencing."""
+"""Leader binding: where the workspace's Leader is running."""
 
 from agentctl.leader.service import (
-    DEFAULT_LEASE_SECONDS,
-    INSTANCE_ENV,
+    LEADER_ENV,
+    LEADER_ROLE,
+    ROLE_LABEL,
+    WORKER_ROLE,
     LeaderService,
     LeaderStatus,
-    validate_instance_id,
 )
 
 __all__ = [
-    "DEFAULT_LEASE_SECONDS",
-    "INSTANCE_ENV",
+    "LEADER_ENV",
+    "LEADER_ROLE",
+    "ROLE_LABEL",
+    "WORKER_ROLE",
     "LeaderService",
     "LeaderStatus",
-    "validate_instance_id",
 ]

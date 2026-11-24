@@ -1,16 +1,20 @@
-"""Messaging: delivery proof, key presses and interrupts."""
+"""Messaging: Herdr owns delivery, its guard, and the turn wait.
+
+There is no agentctl message queue to test. What agentctl must get right is
+identity (session → terminal), passing `--force` and `--wait` through, and
+reporting Herdr's own `started` answer instead of inventing an acknowledgement.
+"""
 
 from __future__ import annotations
 
 import json
-import time
 from pathlib import Path
 
 import pytest
 
 import agentctl.agents.detector as detector
 from agentctl.config import default_config
-from agentctl.errors import DeliveryUnconfirmed, UsageError
+from agentctl.errors import RuntimeFailure, UsageError
 from agentctl.runtime.herdr_core import HerdrCoreAdapter
 from agentctl.session.messaging import MessagingService
 from agentctl.session.service import CreateRequest, SessionService
@@ -34,97 +38,107 @@ def setup(workspace: Path, fake_hc: Path, monkeypatch: pytest.MonkeyPatch):
     conn.close()
 
 
-def _set_reported(state_file: Path, address: str, reported: bool) -> None:
-    state = json.loads(state_file.read_text())
-    for body in state["terminals"].values():
-        if body["address"] == address:
-            body["reported"] = reported
+def test_send_types_into_the_sessions_terminal(setup) -> None:
+    messaging, _service, _store, _ws, state_file, session = setup
+    report = messaging.send(session, "hello")
+    assert report.terminal == session.hc_terminal_id
+    assert report.started is True
+    sent = read_state(state_file)["sent"][-1]
+    assert sent["terminal"] == session.hc_terminal_id
+    assert sent["text"] == "hello"
+
+
+def test_send_adds_no_marker_of_its_own(setup) -> None:
+    """Herdr delivers the text; agentctl must not rewrite the payload."""
+    messaging, _service, _store, _ws, state_file, session = setup
+    payload = "line one\nline two\n\tquoted \"x\" $VAR --flag ✓ 日本語"
+    messaging.send(session, payload)
+    assert read_state(state_file)["sent"][-1]["text"] == payload
+
+
+def test_send_passes_force_through_to_herdr(setup) -> None:
+    messaging, _service, _store, _ws, state_file, session = setup
+    messaging.send(session, "answer the dialog", force=True)
+    argv = calls(state_file)[-1]
+    assert "send" in argv
+    assert "--force" in argv
+
+
+def test_force_is_absent_by_default(setup) -> None:
+    messaging, _service, _store, _ws, state_file, session = setup
+    messaging.send(session, "normal")
+    assert "--force" not in calls(state_file)[-1]
+
+
+def test_send_can_ask_herdr_to_wait_for_the_turn(setup) -> None:
+    messaging, _service, _store, _ws, state_file, session = setup
+    report = messaging.send(session, "work", wait=True, timeout=30)
+    argv = calls(state_file)[-1]
+    assert "--wait" in argv
+    assert argv[argv.index("--timeout") + 1] == "30"
+    assert report.wait is not None
+
+
+def test_started_false_is_reported_honestly(setup) -> None:
+    """Herdr says no turn began; that is a doubt, not a success."""
+    messaging, _service, _store, _ws, state_file, session = setup
+    state = read_state(state_file)
+    state["send_started"] = False
     state_file.write_text(json.dumps(state))
 
+    report = messaging.send(session, "boot")
+    assert report.started is False
+    assert report.to_dict()["started"] is False
 
-def test_send_confirms_when_agent_reports(setup) -> None:
+
+def test_send_to_a_finished_session_is_refused(setup) -> None:
     messaging, _service, _store, _ws, state_file, session = setup
-    report = messaging.send(session, "hello")
-    assert report.confirmed is True
-    assert len(read_state(state_file)["sent"]) == 1
+    state = read_state(state_file)
+    for body in state["terminals"].values():
+        body["state"] = "finished"
+        body["reason"] = "exited"
+    state_file.write_text(json.dumps(state))
+    with pytest.raises(RuntimeFailure):
+        messaging.send(session, "too late")
 
 
-def test_send_refuses_unreported_agent(setup) -> None:
+def test_send_to_a_missing_terminal_is_refused(setup) -> None:
     messaging, _service, _store, _ws, state_file, session = setup
-    address = session.hc_terminal_id
-    assert address is not None
-    _set_reported(state_file, address, False)
-    with pytest.raises(DeliveryUnconfirmed):
-        messaging.send(session, "hello", ready_timeout=0.05)
-    assert read_state(state_file).get("sent", []) == []
+    state = read_state(state_file)
+    state["terminals"] = {}
+    state_file.write_text(json.dumps(state))
+    with pytest.raises(RuntimeFailure) as excinfo:
+        messaging.send(session, "anyone there")
+    assert "no runtime terminal" in excinfo.value.message
 
 
-def test_send_force_bypasses_report(setup) -> None:
+def test_keys_and_interrupt_resolve_the_terminal(setup) -> None:
     messaging, _service, _store, _ws, state_file, session = setup
-    address = session.hc_terminal_id
-    assert address is not None
-    _set_reported(state_file, address, False)
-    report = messaging.send(session, "hello", force=True)
-    assert report.confirmed is False
-    assert len(read_state(state_file)["sent"]) == 1
-    assert "--force" in calls(state_file)[-1]
+    keys = messaging.keys(session, ["down", "enter"])
+    assert keys.terminal == session.hc_terminal_id
+    assert "label" not in calls(state_file)[-1]
+    report = messaging.interrupt(session)
+    assert report.key == "ctrl+c"
 
 
-def test_send_fails_fast_for_non_reporting_agent(
-    setup, workspace: Path
-) -> None:
-    messaging, service, _store, ws, state_file, _session = setup
-    session = service.create(
-        ws, CreateRequest(name="codex-worker", agent="codex", cwd=str(workspace))
-    ).session
-    started = time.perf_counter()
-    with pytest.raises(DeliveryUnconfirmed):
-        messaging.send(session, "hello", ready_timeout=30)
-    assert time.perf_counter() - started < 1.0
-    assert read_state(state_file).get("sent", []) == []
-
-
-def test_keys_passes_through(setup) -> None:
-    messaging, _service, _store, _ws, state_file, session = setup
-    report = messaging.keys(session, ["down", "enter"])
-    assert report.turn == 1
-    assert calls(state_file)[-1] == [
-        "keys",
-        "--json",
-        session.hc_terminal_id,
-        "down",
-        "enter",
-    ]
-
-
-def test_keys_rejects_option_like_names(setup) -> None:
-    messaging, _service, _store, _ws, _state_file, session = setup
+def test_key_names_never_start_with_a_dash(setup) -> None:
+    messaging, _service, _store, _ws, _state, session = setup
     with pytest.raises(UsageError):
-        messaging.keys(session, ["--force"])
-    with pytest.raises(UsageError):
-        messaging.keys(session, [])
+        messaging.keys(session, ["--help"])
 
 
-def test_interrupt_passes_through(setup) -> None:
-    messaging, _service, _store, _ws, state_file, session = setup
-    report = messaging.interrupt(session, timeout=2)
-    assert report.outcome == "interrupted"
-    assert calls(state_file)[-1] == [
-        "interrupt",
-        "--json",
-        "--timeout",
-        "2",
-        session.hc_terminal_id,
-    ]
+def test_children_wait_uses_the_leaders_terminal(setup) -> None:
+    messaging, _service, store, ws, state_file, _session = setup
+    from agentctl.leader.service import LeaderService
+
+    LeaderService(store, messaging.runtime).attach(ws, take_over=True)  # outside-Herdr Leader
+    outcome = messaging.wait_children(leader=store.leaders.get(ws.id), mode="all", timeout=5)
+    assert outcome.reason == "children"
+    argv = calls(state_file)[-1]
+    assert argv[argv.index("--children") + 1] == "all"
 
 
-def test_send_after_address_loss_uses_label_status(setup) -> None:
-    """hc ls omits `reported`; the label fallback must enrich through get."""
-    messaging, _service, store, _ws, state_file, session = setup
-    store.conn.execute(
-        "UPDATE sessions SET hc_terminal_id = NULL WHERE id = ?", (session.id,)
-    )
-    session.hc_terminal_id = None
-    report = messaging.send(session, "hello")
-    assert report.confirmed is True
-    assert len(read_state(state_file)["sent"]) == 1
+def test_children_wait_accepts_no_leader(setup) -> None:
+    messaging, _service, _store, _ws, _state, _session = setup
+    outcome = messaging.wait_children(leader=None, mode="any", timeout=5)
+    assert outcome.reason == "children"

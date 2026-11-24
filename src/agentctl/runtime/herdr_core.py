@@ -127,25 +127,93 @@ class HerdrCoreAdapter(RuntimeAdapter):
         cwd: str,
         name: str,
         labels: dict[str, str] | None = None,
-        env: dict[str, str] | None = None,  # accepted for API symmetry; hc has no --env
+        parent: str | None = None,
+        outlive_parent: bool = False,
+        first_task: str | None = None,
     ) -> TerminalInfo:
-        if env:
-            raise RuntimeFailure("hc cannot inject environment variables into a terminal")
-        args = ["run", "--bg", "--json", "--no-parent", "--name", name, "--cwd", cwd]
+        """Start a terminal, optionally as a child that outlives its parent.
+
+        `--outlive-parent` is what makes a Worker survive its Leader. With a
+        `--parent`, Herdr also types the native notes about that child (blocked,
+        error, exit) into the parent, which is the notification path we want; the
+        flag is what keeps the child alive when the parent's program ends.
+
+        A first task is appended as a positional message, so the agent starts on
+        its work without a send that a booting agent could drop.
+        """
+        args = ["run", "--bg", "--json", "--name", name, "--cwd", cwd]
+        if parent:
+            args.extend(["--parent", parent])
+        else:
+            args.append("--no-parent")
+        if outlive_parent:
+            args.append("--outlive-parent")
         for key, value in (labels or {}).items():
             args.extend(["--label", f"{key}={value}"])
         args.append("--")
         args.extend(argv)
+        if first_task:
+            args.append(first_task)
         return _terminal(self._run_json(args))
 
-    def send_input(self, terminal: str, text: str, *, force: bool = False) -> dict[str, Any]:
+    def label(self, terminal: str, labels: dict[str, str]) -> TerminalInfo:
+        args = ["label", "--json", terminal]
+        for key, value in labels.items():
+            args.append(f"{key}={value}")
+        return _terminal(self._run_json(args))
+
+    def wait_children(
+        self, *, parent: str | None = None, mode: str = "any", timeout: float | None = None
+    ) -> WaitOutcome:
+        """`hc wait --children any|all`: the native multi-worker barrier.
+
+        With no `parent`, the wait is the caller's own view of its children,
+        which is what a Leader running inside Herdr wants. An outside Leader
+        passes the terminal it wants children of.
+        """
+        if mode not in ("any", "all"):
+            raise RuntimeFailure(f"unknown children mode {mode!r}")
+        args = ["wait", "--json", "--children", mode]
+        if parent:
+            args.append(parent)
+        if timeout is not None:
+            args.extend(["--timeout", f"{timeout:g}"])
+        body = self._run_json(args, timeout=(timeout or 180) + 30)
+        return WaitOutcome(
+            ended=bool(body.get("ended")),
+            reason=body.get("reason", "unknown"),
+            status=body.get("status"),
+            exit_code=body.get("exit_code"),
+            turn=int(body.get("turn") or 0),
+            raw=body,
+        )
+
+    def send_input(
+        self,
+        terminal: str,
+        text: str,
+        *,
+        force: bool = False,
+        wait: bool = False,
+        timeout: float | None = None,
+    ) -> dict[str, Any]:
+        """`hc send`, with Herdr's own blocked/readiness guard unless `force`.
+
+        `--wait` makes Herdr wait for the turn the send started, which is the
+        closest thing to a delivery proof that exists: `started: false` means no
+        turn began.
+        """
         args = ["send", "--json"]
         if force:
             args.append("--force")
+        if wait:
+            args.append("--wait")
+            if timeout is not None:
+                args.extend(["--timeout", f"{timeout:g}"])
         args.append("--")
         args.append(terminal)
         args.append(text)
-        return self._run_json(args)
+        return self._run_json(args, timeout=(timeout or 180) + 30 if wait else None)
 
     def send_keys(self, terminal: str, keys: list[str]) -> dict[str, Any]:
         return self._run_json(["keys", "--json", terminal, *keys])

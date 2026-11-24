@@ -1,207 +1,174 @@
-"""Leader lease: one holder at a time, expiry, takeover, fencing, isolation."""
+"""Leader binding: who leads, liveness from Herdr, and no Worker takeover."""
 
 from __future__ import annotations
 
-import sqlite3
-import threading
+import json
 from pathlib import Path
 
 import pytest
 
-from agentctl.clock import now_precise, plus
-from agentctl.errors import LeaderConflict, LeaderRequired, UsageError
-from agentctl.leader.service import LeaderService, validate_instance_id
-from agentctl.storage import Store, open_connection, open_database
+import agentctl.agents.detector as detector
+from agentctl.config import default_config
+from agentctl.errors import LeaderRequired, UsageError
+from agentctl.leader.service import LEADER_ROLE, ROLE_LABEL, WORKER_ROLE, LeaderService
+from agentctl.runtime.herdr_core import HerdrCoreAdapter
+from agentctl.session.service import CreateRequest, SessionService
+from agentctl.storage import Store, open_connection
 from agentctl.workspace.resolver import WorkspaceResolver
+from tests.conftest import read_state
 
 
-def _workspace(tmp_path: Path, name: str = "proj"):
-    root = tmp_path / name
-    root.mkdir(exist_ok=True)
-    conn = open_connection(tmp_path / "registry.db")
+@pytest.fixture()
+def env(tmp_path: Path, workspace: Path, fake_hc: Path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setattr(detector, "installed", lambda definition: True)
+    monkeypatch.delenv("HC_TERMINAL_ID", raising=False)
+    conn = open_connection()
     store = Store(conn)
-    ws, _ = WorkspaceResolver(store).get_or_create(str(root.resolve()))
-    return conn, store, ws
-
-
-def test_attach_creates_epoch_one(tmp_path: Path) -> None:
-    conn, store, ws = _workspace(tmp_path)
-    lease, created = LeaderService(store).attach(ws, instance_id="inst_a")
-    assert created is True
-    assert lease.leader_epoch == 1
-    assert lease.leader_id == ws.leader_id
-    assert lease.lease_token
+    ws, _ = WorkspaceResolver(store).get_or_create(str(workspace))
+    runtime = HerdrCoreAdapter()
+    config = default_config()
+    config.defaults.agent = "omp"
+    sessions = SessionService(store, runtime, config)
+    yield store, ws, runtime, sessions, fake_hc
     conn.close()
 
 
-def test_second_instance_is_refused_while_lease_is_live(tmp_path: Path) -> None:
-    conn, store, ws = _workspace(tmp_path)
-    service = LeaderService(store)
-    service.attach(ws, instance_id="inst_a")
-    with pytest.raises(LeaderConflict) as excinfo:
-        service.attach(ws, instance_id="inst_b")
-    assert "already has a live Leader" in excinfo.value.message
-    conn.close()
+def _add_terminal(state_file: Path, address: str, labels: dict[str, str], *, state: str = "live") -> None:
+    # The fake hc writes this file on its first call; a test that seeds a
+    # terminal before any call starts from the same empty shape.
+    current = json.loads(state_file.read_text()) if state_file.exists() else {"calls": [], "terminals": {}}
+    current["terminals"][address] = {
+        "address": address,
+        "name": f"term-{address}",
+        "state": state,
+        "status": {"app": "omp", "state": "idle"},
+        "reported": True,
+        "cwd": "/tmp",
+        "labels": dict(labels),
+        "turn": 0,
+    }
+    state_file.write_text(json.dumps(current))
 
 
-def test_same_instance_reattaches_without_bumping_epoch(tmp_path: Path) -> None:
-    conn, store, ws = _workspace(tmp_path)
-    service = LeaderService(store)
-    first, _ = service.attach(ws, instance_id="inst_a")
-    again, created = service.attach(ws, instance_id="inst_a")
-    assert created is False
-    assert again.leader_epoch == first.leader_epoch
-    assert again.lease_token == first.lease_token
-    conn.close()
+def test_attach_without_a_terminal_is_an_outside_leader(env) -> None:
+    store, ws, runtime, _sessions, _hc = env
+    binding = LeaderService(store, runtime).attach(ws)
+    assert binding.terminal is None
+    assert binding.workspace_id == ws.id
+    assert binding.leader_id == ws.leader_id
 
 
-def test_takeover_bumps_epoch_and_fences_the_old_token(tmp_path: Path) -> None:
-    conn, store, ws = _workspace(tmp_path)
-    service = LeaderService(store)
-    old, _ = service.attach(ws, instance_id="inst_a")
-    new = service.takeover(ws, instance_id="inst_b")
-    assert new.leader_epoch == old.leader_epoch + 1
-    assert new.lease_token != old.lease_token
-
-    # The superseded instance cannot renew, release or act at all.
-    for call in (
-        lambda: service.renew(ws, old.lease_token, instance_id="inst_a"),
-        lambda: service.require(ws, old.lease_token, instance_id="inst_a"),
-    ):
-        with pytest.raises(LeaderConflict):
-            call()
-    assert service.renew(ws, new.lease_token, instance_id="inst_b").leader_epoch == new.leader_epoch
-    conn.close()
+def test_attach_records_the_leader_terminal_and_labels_it(env) -> None:
+    store, ws, runtime, _sessions, state_file = env
+    _add_terminal(state_file, "t1", {})
+    binding = LeaderService(store, runtime).attach(ws, terminal="t1")
+    assert binding.terminal == "t1"
+    state = json.loads(state_file.read_text())
+    assert state["terminals"]["t1"]["labels"][ROLE_LABEL] == LEADER_ROLE
+    assert state["terminals"]["t1"]["labels"]["agentctl.workspace"] == ws.id
 
 
-def test_lease_expiry_makes_it_claimable(tmp_path: Path) -> None:
-    conn, store, ws = _workspace(tmp_path)
-    service = LeaderService(store, lease_seconds=0.01)
-    lease, _ = service.attach(ws, instance_id="inst_a")
-    # Age the row rather than sleeping: expiry is a property of the stored time.
-    store.leases.upsert(
-        type(lease)(
-            **{
-                **{f: getattr(lease, f) for f in lease.__slots__},
-                "expires_at": plus(now_precise(), -5),
-            }
-        )
-    )
-    status = service.status(ws)
-    assert status.held is False
-    assert status.expired is True
-    assert service.current(ws).leader_instance_id == "inst_a"
-
-    replacement, created = service.attach(ws, instance_id="inst_b")
-    assert created is True
-    assert replacement.leader_epoch == lease.leader_epoch + 1
-    conn.close()
+def test_a_worker_terminal_cannot_become_the_leader(env) -> None:
+    store, ws, runtime, sessions, state_file = env
+    created = sessions.create(ws, CreateRequest(name="w1", agent="omp", cwd=ws.root_path))
+    address = created.terminal.address
+    with pytest.raises(LeaderRequired) as excinfo:
+        LeaderService(store, runtime).attach(ws, terminal=address)
+    assert "is a Worker" in excinfo.value.message
 
 
-def test_renewal_extends_the_deadline(tmp_path: Path) -> None:
-    conn, store, ws = _workspace(tmp_path)
-    service = LeaderService(store, lease_seconds=60)
-    lease, _ = service.attach(ws, instance_id="inst_a")
-    renewed = service.renew(ws, lease.lease_token, instance_id="inst_a")
-    assert renewed.expires_at >= lease.expires_at
-    conn.close()
+def test_worker_terminals_carry_the_worker_role_and_outlive_the_parent(env) -> None:
+    store, ws, runtime, sessions, state_file = env
+    created = sessions.create(ws, CreateRequest(name="w1", agent="omp", cwd=ws.root_path))
+    state = json.loads(state_file.read_text())
+    # The fake hc keys terminals by the launched --name, which agentctl derives
+    # from the session id (`ac-<slug>-<id6>`), not from the user-facing name.
+    body = next(b for b in state["terminals"].values() if b["address"] == created.terminal.address)
+    assert body["address"] == created.terminal.address
+    assert body["labels"][ROLE_LABEL] == WORKER_ROLE
+    assert body["labels"]["agentctl.session"] == created.session.id
+    assert body["die_with_parent"] is False, "a Worker must outlive its Leader"
+    assert body["parent"] is None, "no Leader is bound, so there is no parent"
 
 
-def test_release_frees_the_slot_and_invalidates_the_token(tmp_path: Path) -> None:
-    conn, store, ws = _workspace(tmp_path)
-    service = LeaderService(store)
-    lease, _ = service.attach(ws, instance_id="inst_a")
-    assert service.release(ws, lease.lease_token, instance_id="inst_a") is True
-    with pytest.raises(LeaderConflict):
-        service.require(ws, lease.lease_token, instance_id="inst_a")
-    successor, created = service.attach(ws, instance_id="inst_b")
-    assert created is True
-    assert successor.leader_epoch == lease.leader_epoch + 1
-    conn.close()
-
-
-def test_require_refuses_missing_token_and_wrong_instance(tmp_path: Path) -> None:
-    conn, store, ws = _workspace(tmp_path)
-    service = LeaderService(store)
-    lease, _ = service.attach(ws, instance_id="inst_a")
+def test_second_leader_is_refused_while_the_first_is_live(env) -> None:
+    store, ws, runtime, _sessions, state_file = env
+    _add_terminal(state_file, "t1", {})
+    _add_terminal(state_file, "t2", {})
+    service = LeaderService(store, runtime)
+    service.attach(ws, terminal="t1")
     with pytest.raises(LeaderRequired):
-        service.require(ws, None)
-    with pytest.raises(LeaderConflict):
-        service.require(ws, lease.lease_token, instance_id="someone_else")
-    # A worker presenting no token never gets authority.
-    with pytest.raises(LeaderRequired):
-        service.require(ws, "")
-    conn.close()
+        service.attach(ws, terminal="t2")
 
 
-def test_workspaces_are_isolated(tmp_path: Path) -> None:
-    conn, store, ws_a = _workspace(tmp_path, "a")
-    root_b = tmp_path / "b"
-    root_b.mkdir()
-    ws_b, _ = WorkspaceResolver(store).get_or_create(str(root_b.resolve()))
-    service = LeaderService(store)
-    lease_a, _ = service.attach(ws_a, instance_id="inst_a")
-    lease_b, _ = service.attach(ws_b, instance_id="inst_b")
-    assert lease_a.leader_epoch == 1 and lease_b.leader_epoch == 1
-    # A's token is meaningless for B.
-    with pytest.raises(LeaderConflict):
-        service.require(ws_b, lease_a.lease_token)
-    with pytest.raises(LeaderConflict):
-        service.require(ws_a, lease_b.lease_token)
-    conn.close()
-
-
-def test_concurrent_claims_produce_exactly_one_winner(tmp_path: Path) -> None:
-    conn, store, ws = _workspace(tmp_path)
-    conn.close()
-    db_path = tmp_path / "registry.db"
-    barrier = threading.Barrier(6)
-    results: list[str] = []
-    lock = threading.Lock()
-
-    def claim(index: int) -> None:
-        connection = open_connection(db_path)
-        try:
-            local_store = Store(connection)
-            local_ws = local_store.workspaces.find_by_id(ws.id)
-            barrier.wait()
-            try:
-                LeaderService(local_store).attach(local_ws, instance_id=f"inst_{index}")
-                with lock:
-                    results.append(f"won:{index}")
-            except LeaderConflict:
-                with lock:
-                    results.append(f"lost:{index}")
-        finally:
-            connection.close()
-
-    threads = [threading.Thread(target=claim, args=(i,)) for i in range(6)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-
-    assert len([r for r in results if r.startswith("won")]) == 1, results
-    assert sqlite3.connect(db_path).execute("SELECT COUNT(*) FROM leader_leases").fetchone()[0] == 1
-
-
-def test_validate_instance_id() -> None:
-    assert validate_instance_id("abc").strip() == "abc"
-    assert validate_instance_id(None).startswith("inst_")
-    with pytest.raises(UsageError):
-        validate_instance_id("   ")
-    with pytest.raises(UsageError):
-        validate_instance_id("x" * 129)
-
-
-def test_status_reports_pending_inbox(tmp_path: Path) -> None:
-    conn, store, ws = _workspace(tmp_path)
-    service = LeaderService(store)
-    service.attach(ws, instance_id="inst_a")
+def test_a_dead_terminal_frees_the_binding(env) -> None:
+    store, ws, runtime, _sessions, state_file = env
+    _add_terminal(state_file, "t1", {})
+    _add_terminal(state_file, "t2", {})
+    service = LeaderService(store, runtime)
+    service.attach(ws, terminal="t1")
     status = service.status(ws)
-    assert status.pending_inbox == 0
-    assert status.held is True
-    assert status.expires_in is not None and status.expires_in > 0
-    body = status.to_dict()
-    assert body["lease"]["leader_epoch"] == 1
-    conn.close()
+    assert status.live is True
+
+    # Herdr says the terminal finished: the binding is stale, nothing to expire.
+    state = json.loads(state_file.read_text())
+    state["terminals"]["t1"]["state"] = "finished"
+    state_file.write_text(json.dumps(state))
+    assert service.status(ws).live is False
+    replaced = service.attach(ws, terminal="t2")
+    assert replaced.terminal == "t2"
+
+
+def test_takeover_replaces_a_live_binding_explicitly(env) -> None:
+    store, ws, runtime, _sessions, state_file = env
+    _add_terminal(state_file, "t1", {})
+    _add_terminal(state_file, "t2", {})
+    service = LeaderService(store, runtime)
+    service.attach(ws, terminal="t1")
+    binding = service.attach(ws, terminal="t2", take_over=True)
+    assert binding.terminal == "t2"
+
+
+def test_status_explains_an_unbound_workspace(env) -> None:
+    store, ws, runtime, _sessions, _hc = env
+    status = LeaderService(store, runtime).status(ws)
+    assert status.binding is None
+    assert status.live is False
+    assert "no Leader has attached" in (status.reason or "")
+    assert status.to_dict()["bound"] is False
+
+
+def test_attaching_to_an_unknown_terminal_is_rejected(env) -> None:
+    store, ws, runtime, _sessions, _hc = env
+    with pytest.raises(UsageError):
+        LeaderService(store, runtime).attach(ws, terminal="t99")
+
+
+def test_terminal_from_another_workspace_is_rejected(env) -> None:
+    store, ws, runtime, _sessions, state_file = env
+    _add_terminal(state_file, "t1", {"agentctl.workspace": "ws_other"})
+    with pytest.raises(UsageError) as excinfo:
+        LeaderService(store, runtime).attach(ws, terminal="t1")
+    assert "belongs to workspace" in excinfo.value.message
+
+
+def test_detach_forgets_the_binding(env) -> None:
+    store, ws, runtime, _sessions, _hc = env
+    service = LeaderService(store, runtime)
+    service.attach(ws)
+    assert service.detach(ws) is True
+    assert service.current(ws) is None
+    assert service.detach(ws) is False
+
+
+def test_workspaces_are_isolated(env, tmp_path: Path) -> None:
+    store, ws_a, runtime, _sessions, _hc = env
+    other_root = tmp_path / "other"
+    other_root.mkdir()
+    ws_b, _ = WorkspaceResolver(store).get_or_create(str(other_root.resolve()))
+    service = LeaderService(store, runtime)
+    service.attach(ws_a)
+    assert service.current(ws_b) is None
+    service.attach(ws_b)
+    assert service.current(ws_a) is not None
+    assert service.current(ws_b) is not None

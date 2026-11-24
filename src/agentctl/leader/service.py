@@ -1,284 +1,223 @@
-"""Leader lease: which process may act for this workspace right now?
+"""Leader binding: which terminal, if any, is the workspace's Leader?
 
-The model
----------
-`workspace_id` and `leader_id` are durable identities created by `init`. They
-never change and they are not held by anyone in particular. Authority comes
-from a *lease*: one row per workspace naming exactly one `leader_instance_id`,
-the `leader_epoch` it took over at, and a `lease_token` it must present for
-every mutating call.
+What this is
+------------
+A record of where the Leader is running, so a fresh Leader can find the pool it
+left behind. Nothing more. The row says "workspace ws_x is led from terminal t7,
+native session 01a2…". It grants no authority and blocks no other process.
 
-Why a lease and not a pid/lock file
------------------------------------
-The Leader is often a chat session, so any process claiming authority must be
-able to lose it when it dies without cleanup. A row with an expiry covers that:
-a crashed Leader stops renewing, the row expires, and the next claim succeeds.
-The row is the arbiter because SQLite serializes writers on it, so two claims
-racing each other produce one winner and one clear conflict, with no window
-where both believe they hold it.
+Why there is no lease, epoch or token
+-------------------------------------
+v0.2 tried to make "one live Leader" a hard guarantee with expiring leases and
+fencing tokens. That was agentctl re-implementing a supervisor, and it broke the
+first principle: Herdr already owns terminal liveness. A terminal's `state` is
+the truth about whether a Leader is alive, and Herdr reports it.
 
-Fencing
--------
-Every takeover bumps `leader_epoch`. A control call presents its token, and the
-service compares `(epoch, token, instance)` against the stored row. An old
-instance that was superseded keeps failing even though its row write succeeded
-earlier, because the stored epoch moved on. That is the fencing property: a
-stale Leader cannot execute a side-effecting command.
+So the rule is the simple one:
+
+- two Leaders are prevented by *using* the same binding, not by a lock;
+- a stale binding is detected by asking Herdr, not by a timeout;
+- `agentctl leader attach` writes the binding; `leader status` compares it with
+  what Herdr says about that terminal.
+
+The one thing still enforced is that a Worker cannot silently become the
+Leader: a Worker is launched with the `agentctl.role=worker` label and `attach`
+refuses a terminal carrying it.
 """
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
-from agentctl.clock import elapsed_since, new_id, now_precise, plus, token
-from agentctl.errors import LeaderConflict, LeaderRequired, UsageError
-from agentctl.storage.database import transaction
-from agentctl.storage.models import LeaderLease, Workspace
+from agentctl.clock import now
+from agentctl.errors import LeaderRequired, UsageError
+from agentctl.runtime.base import RuntimeAdapter, TerminalInfo
+from agentctl.storage.models import LeaderBinding, Workspace
 
-# How long a lease stays valid without a heartbeat. Long enough that a Leader
-# thinking hard through one long turn does not lose authority, short enough
-# that a crashed Leader is replaceable without a manual repair step.
-DEFAULT_LEASE_SECONDS = 120.0
-# A leader instance must be able to state its own identity. A per-process value
-# is right: two CLI invocations from the same process share it deliberately
-# (they are the same Leader), while a new process must claim for itself.
-INSTANCE_ENV = "AGENTCTL_LEADER_INSTANCE"
+#: Label marking a terminal as a Worker, so it can never be adopted as Leader.
+ROLE_LABEL = "agentctl.role"
+WORKER_ROLE = "worker"
+LEADER_ROLE = "leader"
+#: Environment variable a Leader's terminal can carry, for harnesses that start
+#: outside Herdr and want the same binding without a flag.
+LEADER_ENV = "AGENTCTL_LEADER"
 
 
 @dataclass(slots=True)
 class LeaderStatus:
     workspace: Workspace
-    lease: LeaderLease | None
-    held: bool
-    expired: bool
-    expires_in: float | None
-    pending_inbox: int
+    binding: LeaderBinding | None
+    terminal: TerminalInfo | None
+    #: True when the binding's terminal is still live according to Herdr.
+    live: bool
+    #: The terminal a new Leader should attach to (the binding's, when live).
+    reason: str | None
 
     def to_dict(self) -> dict[str, object]:
         return {
             "workspace_id": self.workspace.id,
             "leader_id": self.workspace.leader_id,
-            "held": self.held,
-            "expired": self.expired,
-            "expires_in_seconds": None if self.expires_in is None else round(self.expires_in, 1),
-            "lease": self.lease.to_dict() if self.lease else None,
-            "inbox_pending": self.pending_inbox,
+            "bound": self.binding is not None,
+            "live": self.live,
+            "reason": self.reason,
+            "binding": self.binding.to_dict() if self.binding else None,
+            "terminal": {
+                "address": self.terminal.address,
+                "state": self.terminal.state,
+                "status": self.terminal.status,
+            }
+            if self.terminal
+            else None,
         }
 
 
 class LeaderService:
-    """Claim, renew, release and fence the workspace lease.
+    """Read and write the workspace's Leader binding.
 
-    Every method that mutates takes the write lock through `transaction`, so
-    the read of the current row and the decision about it are one atomic step.
+    Deliberately small: no locks, no expiry, no token. Every method either reads
+    or writes one row, and liveness always comes from Herdr.
     """
 
-    def __init__(self, store, *, lease_seconds: float = DEFAULT_LEASE_SECONDS) -> None:
+    def __init__(self, store, runtime: RuntimeAdapter) -> None:
         self.store = store
-        self.lease_seconds = lease_seconds
+        self.runtime = runtime
 
-    # ------------------------------------------------------------- inspection
+    # ------------------------------------------------------------------ read
 
-    def current(self, workspace: Workspace) -> LeaderLease | None:
-        return self.store.leases.get(workspace.id)
+    def current(self, workspace: Workspace) -> LeaderBinding | None:
+        return self.store.leaders.get(workspace.id)
 
-    def _expired(self, lease: LeaderLease | None) -> bool:
-        if lease is None or not lease.held:
-            return True
-        remaining = elapsed_since(lease.expires_at)
-        return remaining is None or remaining >= 0
+    def _terminal_for(self, binding: LeaderBinding | None) -> TerminalInfo | None:
+        if binding is None:
+            return None
+        if binding.terminal:
+            terminal = self.runtime.find_terminal(binding.terminal)
+            if terminal is not None and terminal.is_local:
+                return terminal
+        # The address may be stale after a core restart; labels survive it.
+        for terminal in self.runtime.list_terminals(
+            labels={"agentctl.workspace": workspace_label(binding)}, include_finished=False
+        ):
+            if terminal.is_local and terminal.labels.get(ROLE_LABEL) == LEADER_ROLE:
+                return terminal
+        return None
 
     def status(self, workspace: Workspace) -> LeaderStatus:
-        lease = self.current(workspace)
-        expired = self._expired(lease)
-        expires_in: float | None = None
-        if lease is not None and not expired:
-            remaining = elapsed_since(lease.expires_at)
-            expires_in = None if remaining is None else -remaining
-        return LeaderStatus(
-            workspace=workspace,
-            lease=lease,
-            held=lease is not None and lease.held and not expired,
-            expired=expired and lease is not None,
-            expires_in=expires_in,
-            pending_inbox=self.store.inbox.count_pending(workspace.id),
-        )
+        binding = self.current(workspace)
+        if binding is None:
+            return LeaderStatus(workspace, None, None, False, "no Leader has attached yet")
+        terminal = self._terminal_for(binding)
+        if terminal is None:
+            return LeaderStatus(
+                workspace,
+                binding,
+                None,
+                False,
+                "the bound terminal is gone; any Leader may attach",
+            )
+        if not terminal.live:
+            return LeaderStatus(
+                workspace, binding, terminal, False, "the bound terminal has finished"
+            )
+        return LeaderStatus(workspace, binding, terminal, True, None)
 
-    # ------------------------------------------------------------------ claim
+    # ----------------------------------------------------------------- write
 
     def attach(
         self,
         workspace: Workspace,
         *,
-        instance_id: str | None = None,
-        takeover: bool = False,
-        note: str | None = None,
-    ) -> tuple[LeaderLease, bool]:
-        """Claim the lease. Returns (lease, created) where created means new.
+        terminal: str | None = None,
+        native_session_id: str | None = None,
+        take_over: bool = False,
+    ) -> LeaderBinding:
+        """Bind this Leader to a terminal (or to nothing, for an outside Leader).
 
-        `takeover` is the explicit "I know someone else holds this" path. It is
-        still refused while a *live* lease exists unless `force` semantics are
-        requested through `takeover`, because silently stealing authority from
-        a running Leader is exactly what the lease exists to prevent.
+        `terminal` defaults to `$HC_TERMINAL_ID`, which is how a Leader running
+        inside Herdr identifies itself without arguments. An outside Leader
+        passes no terminal and gets a binding with no address; Herdr then reports
+        it as not live, which is accurate.
         """
-        instance = instance_id or new_id("inst")
-        stamp = now_precise()
-        with transaction(self.store.conn):
-            existing = self.store.leases.get(workspace.id)
-            # Re-attaching the same instance is a renewal, not a takeover, so a
-            # Leader calling `attach` twice does not bump its own epoch.
-            if existing is not None and existing.held and not self._expired(existing):
-                if existing.leader_instance_id == instance:
-                    renewed = self._renew_row(existing, stamp)
-                    return renewed, False
-                if not takeover:
-                    raise LeaderConflict(
-                        f"workspace {workspace.id} already has a live Leader "
-                        f"(instance {existing.leader_instance_id}, epoch {existing.leader_epoch})",
-                        "if that Leader is gone, use `agentctl leader takeover`; "
-                        "otherwise run `agentctl leader status`",
-                    )
-            epoch = 1 if existing is None else existing.leader_epoch + 1
-            lease = LeaderLease(
-                workspace_id=workspace.id,
-                leader_id=workspace.leader_id,
-                leader_instance_id=instance,
-                leader_epoch=epoch,
-                lease_token=token(),
-                acquired_at=stamp,
-                renewed_at=stamp,
-                expires_at=plus(stamp, self.lease_seconds),
-                released_at=None,
-            )
-            self.store.leases.upsert(lease)
-        return lease, True
-
-    def _renew_row(self, lease: LeaderLease, stamp: str) -> LeaderLease:
-        if not self.store.leases.renew(
-            lease.workspace_id,
-            lease.lease_token,
-            renewed_at=stamp,
-            expires_at=plus(stamp, self.lease_seconds),
-        ):
-            raise LeaderConflict(
-                "lease changed while renewing",
-                "run `agentctl leader status`, then re-attach",
-            )
-        return LeaderLease(
-            workspace_id=lease.workspace_id,
-            leader_id=lease.leader_id,
-            leader_instance_id=lease.leader_instance_id,
-            leader_epoch=lease.leader_epoch,
-            lease_token=lease.lease_token,
-            acquired_at=lease.acquired_at,
-            renewed_at=stamp,
-            expires_at=plus(stamp, self.lease_seconds),
-            released_at=None,
-        )
-
-    def takeover(self, workspace: Workspace, *, instance_id: str | None = None) -> LeaderLease:
-        lease, _created = self.attach(workspace, instance_id=instance_id, takeover=True)
-        return lease
-
-    def renew(self, workspace: Workspace, lease_token: str, *, instance_id: str) -> LeaderLease:
-        stamp = now_precise()
-        self.require(workspace, lease_token, instance_id=instance_id)
-        with transaction(self.store.conn):
-            existing = self.store.leases.get(workspace.id)
-            if existing is None or existing.lease_token != lease_token:
-                raise LeaderConflict(
-                    "the lease was taken over by another Leader instance",
-                    "run `agentctl leader status`, then attach or takeover",
+        address = terminal or os.environ.get("HC_TERMINAL_ID") or None
+        terminal_info: TerminalInfo | None = None
+        if address:
+            terminal_info = self.runtime.find_terminal(address)
+            if terminal_info is None:
+                raise UsageError(
+                    f"terminal {address} does not exist",
+                    "run this from inside the Leader's Herdr terminal, or pass --terminal",
                 )
-            return self._renew_row(existing, stamp)
+            if terminal_info.labels.get(ROLE_LABEL) == WORKER_ROLE:
+                raise LeaderRequired(
+                    f"terminal {address} is a Worker, not a Leader",
+                    "a Worker never becomes the Leader implicitly; run `agentctl leader attach` "
+                    "from the Leader's own terminal",
+                )
+            owner = terminal_info.labels.get("agentctl.workspace")
+            if owner and owner != workspace.id:
+                raise UsageError(
+                    f"terminal {address} belongs to workspace {owner}",
+                    "attach from a terminal in this workspace, or pass --terminal",
+                )
 
-    def release(self, workspace: Workspace, lease_token: str, *, instance_id: str) -> bool:
-        self.require(workspace, lease_token, instance_id=instance_id)
-        with transaction(self.store.conn):
-            return self.store.leases.release(workspace.id, lease_token, released_at=now_precise())
+        existing = self.current(workspace)
+        if existing is not None and not take_over:
+            status = self.status(workspace)
+            if status.live and existing.terminal != address:
+                raise LeaderRequired(
+                    f"workspace {workspace.id} is already led from terminal "
+                    f"{existing.terminal} ({existing.native_session_id or 'no session id'})",
+                    "reuse that terminal, or run `agentctl leader attach --takeover` "
+                    "if it is really gone",
+                )
 
-    def authorize(self, workspace: Workspace, lease_token: str | None, *, instance_id: str | None = None) -> str:
-        """Decide whether a mutating command may proceed. Returns the authority kind.
-
-        "leader" once a live lease exists and the caller presents its token;
-        "unclaimed" when no Leader has ever attached, which keeps single-operator
-        v0.1 use working; and an error in every other case. Fencing lives here:
-        the moment someone attaches or takes over, an older instance's token
-        stops being accepted.
-        """
-        lease = self.current(workspace)
-        if lease is None:
-            return "unclaimed"
-        if not lease_token:
-            if not lease.held:
-                return "unclaimed"
-            raise LeaderRequired(
-                f"workspace {workspace.id} has a live Leader (epoch {lease.leader_epoch})",
-                "pass --lease-token or set AGENTCTL_LEASE_TOKEN from `agentctl leader attach`; "
-                "or run `agentctl leader takeover` to replace it",
+        stamp = now()
+        binding = LeaderBinding(
+            workspace_id=workspace.id,
+            leader_id=workspace.leader_id,
+            terminal=address,
+            native_session_id=native_session_id or existing_native(existing),
+            attached_at=stamp,
+            updated_at=stamp,
+        )
+        self.store.leaders.upsert(binding)
+        if terminal_info is not None:
+            # Label the Leader's own terminal so it is discoverable, and so a
+            # Worker's terminal can never be mistaken for it.
+            self.runtime.label(
+                terminal_info.address,
+                {"agentctl.workspace": workspace.id, ROLE_LABEL: LEADER_ROLE},
             )
-        self.require(workspace, lease_token, instance_id=instance_id)
-        return "leader"
+        self.store.workspaces.touch(workspace.id, stamp)
+        return binding
 
-    # ---------------------------------------------------------------- fencing
-
-    def require(
-        self,
-        workspace: Workspace,
-        lease_token: str | None,
-        *,
-        instance_id: str | None = None,
-        require_live: bool = True,
-    ) -> LeaderLease:
-        """Raise unless `lease_token` is the workspace's current, live lease.
-
-        This is the single gate every mutating command calls. It is
-        deliberately strict about identity: a token alone is not enough once
-        an operator has taken over, because the token of a superseded epoch must
-        stop working.
-        """
-        if not lease_token:
-            raise LeaderRequired(
-                f"workspace {workspace.id} has no Leader lease presented",
-                "run `agentctl leader attach` and pass its lease token, "
-                "or set AGENTCTL_LEASE_TOKEN",
-            )
-        lease = self.current(workspace)
-        if lease is None:
-            raise LeaderRequired(
-                f"workspace {workspace.id} has no Leader lease",
-                "run `agentctl leader attach` first",
-            )
-        if lease.lease_token != lease_token:
-            raise LeaderConflict(
-                f"lease token does not match the current Leader "
-                f"(held by instance {lease.leader_instance_id}, epoch {lease.leader_epoch})",
-                "another Leader took over; run `agentctl leader status` to see who holds it",
-            )
-        if instance_id is not None and lease.leader_instance_id != instance_id:
-            raise LeaderConflict(
-                "this Leader instance was superseded by another instance",
-                "run `agentctl leader status`, then re-attach",
-            )
-        if not lease.held:
-            raise LeaderConflict(
-                "the Leader lease was released",
-                "run `agentctl leader attach` to claim it again",
-            )
-        if require_live and self._expired(lease):
-            raise LeaderConflict(
-                "the Leader lease expired",
-                "run `agentctl leader heartbeat` to renew it, or `agentctl leader attach`",
-            )
-        return lease
+    def detach(self, workspace: Workspace) -> bool:
+        """Forget the binding. The terminal keeps running; only the record goes."""
+        with self.store.conn:
+            removed = self.store.leaders.delete(workspace.id)
+        self.store.workspaces.touch(workspace.id, now())
+        return removed
 
 
-def validate_instance_id(value: str | None) -> str:
-    if value is None or value == "":
-        return new_id("inst")
-    cleaned = value.strip()
-    if not cleaned:
-        raise UsageError("leader instance id must not be blank")
-    if len(cleaned) > 128:
-        raise UsageError("leader instance id must be at most 128 characters")
-    return cleaned
+def existing_native(binding: LeaderBinding | None) -> str | None:
+    return binding.native_session_id if binding else None
+
+
+def workspace_label(binding: LeaderBinding) -> str:
+    """The workspace id a binding's terminal should carry.
+
+    Stored separately from the binding because the lookup above needs it before
+    it has a workspace row in hand.
+    """
+    return getattr(binding, "workspace_id", "")
+
+
+__all__ = [
+    "LEADER_ENV",
+    "LEADER_ROLE",
+    "ROLE_LABEL",
+    "WORKER_ROLE",
+    "LeaderService",
+    "LeaderStatus",
+]

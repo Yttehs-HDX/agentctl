@@ -31,25 +31,3 @@ def session_state_dir() -> Path:
     return config_dir() / "sessions"
 
 
-def bin_dir() -> Path:
-    """Directory holding the launcher the hooks call.
-
-    Hooks run inside somebody else's agent, whose PATH agentctl does not
-    control. A launcher with an absolute location is the only reliable handle,
-    so `integrations install` writes one here and every hook uses it.
-    """
-    return config_dir() / "bin"
-
-
-def launcher_path() -> Path:
-    return bin_dir() / "agentctl"
-
-
-def integrations_dir() -> Path:
-    """Where agentctl keeps the hook assets it hands to harnesses."""
-    return config_dir() / "integrations"
-
-
-def spool_dir() -> Path:
-    """Where harness hooks append their observations for later ingest."""
-    return config_dir() / "spool"

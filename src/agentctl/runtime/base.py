@@ -57,6 +57,20 @@ class WaitOutcome:
     turn: int
     raw: dict[str, Any] = field(default_factory=dict)
 
+    @property
+    def turn_ended(self) -> bool:
+        """A worker's turn finished, whether it reported or merely stopped.
+
+        Herdr returns `reason: "status"` when a child left `working`. That is the
+        agent-agnostic completion signal: it does not depend on the child calling
+        `hc send`, and it does not require parsing the screen.
+        """
+        return self.ended and self.reason == "status"
+
+    @property
+    def timed_out(self) -> bool:
+        return self.reason == "timeout"
+
 
 class RuntimeAdapter(ABC):
     """Terminal lifecycle for one runtime backend."""
@@ -75,7 +89,9 @@ class RuntimeAdapter(ABC):
         cwd: str,
         name: str,
         labels: dict[str, str] | None = None,
-        env: dict[str, str] | None = None,
+        parent: str | None = None,
+        outlive_parent: bool = False,
+        first_task: str | None = None,
     ) -> TerminalInfo: ...
 
     @abstractmethod
@@ -103,6 +119,14 @@ class RuntimeAdapter(ABC):
 
     @abstractmethod
     def wait(self, terminal: str, *, timeout: float | None = None) -> WaitOutcome: ...
+
+    @abstractmethod
+    def label(self, terminal: str, labels: dict[str, str]) -> TerminalInfo: ...
+
+    @abstractmethod
+    def wait_children(
+        self, *, parent: str | None = None, mode: str = "any", timeout: float | None = None
+    ) -> WaitOutcome: ...
 
     @abstractmethod
     def kill(self, terminal: str) -> TerminalInfo: ...

@@ -229,127 +229,94 @@ agentctl v0.1 has no `--on` flag: `create_terminal` never passes it.
 
 ---
 
-# v0.2 capability matrix
+# Herdr capabilities agentctl relies on (v0.3)
 
-Every row below was executed on this machine. A cell no measurement backs says so
-instead of guessing. Measured on **Herdr Core 0.1.18, OMP 19.1.0, Pi 1.5.2,
-Claude Code 2.1.327**, 2026-11-25.
+Measured on hc 0.1.18 in a scratch core (`HC_SESSION=lab2`-`hv5`), with a scripted
+harness that emits real OSC 7501 status. Everything here is delegated to Herdr.
 
-## What each harness can do
+## Parentage and survival
 
-| Capability | omp | pi | claude | codex | opencode |
-| --- | --- | --- | --- | --- | --- |
-| Reports HC status words | yes | yes | yes | **no** | unknown |
-| Hook receives message text | yes (`input`) | yes (`input`) | yes (`UserPromptSubmit`) | **no** | unverified |
-| Exact per-message ACK | yes | yes | yes | **no** | unverified |
-| Turn start event | yes | yes | **no** | no | unverified |
-| Turn end event | yes (`agent_end`) | yes (`agent_end`) | yes (`Stop`) | no | unverified |
-| Idle wake without typing | yes (`sendMessage`) | yes (`sendMessage`) | yes (`Stop` block) | **no** | unverified |
-| Verified on this machine | yes | yes | yes | n/a | no |
-
-Codex and OpenCode are deliberately not integrated: codex emits no Herdr Core
-status record and has no verified hook, so a send to it can only be
-`delivery_unknown` and its completion rests on a status stream it does not
-produce.
-
-## Herdr Core event stream
-
-`hc events --json` streams one JSON document per line:
-
-```text
-{"channel":null,"seq":4,"terminals":[...]}                       snapshot, first line
-{"jsonrpc":"2.0","method":"event","params":{"seq":8,"terminal":"t2",
- "type":"status","data":{"reported":true,"status":{"app":"omp","state":"idle"}}}}
-{"jsonrpc":"2.0","method":"event","params":{"seq":53,"terminal":"t2",
- "type":"turn","data":{"state":"done","turn":1}}}
-{"seq":9}                                                         heartbeat
+```sh
+hc run --bg --name worker --parent t1 --outlive-parent -- <cmd>
 ```
 
-Measured event types: `created`, `foreground`, `title`, `status`, `turn`,
-`finished`, `labels`, `removed`. `--label k=v` filters. `events.subscribe`
-(JSON-RPC) returns `{seq, terminals}` plus the same notifications, and sends a
-fresh snapshot to a subscriber that fell behind.
+`hc get` reports `parent: "t1"`, `die_with_parent: false`. Killing the parent
+leaves the child `state: live`. Without `--outlive-parent`, a terminal started
+from inside another one inherits `die_with_parent: true`.
 
-`status: working → done` plus a `turn` bump is an agent-agnostic
-`turn.completed`; agentctl uses it as the fallback path for every agent that
-reports status. The mapper is `events/ingest.py` and dedupes on `(session, turn)`
-so a replayed pair, or a resumed core replaying its snapshot, yields one event.
+This pair is the whole reason a Worker outlives its Leader while still being a
+child for Herdr's notifications.
 
-## OMP 19.1.0 — measured extension facts
+## Native child notes
 
-- `pi.on("input", ...)` fires for `hc send` text with
-  `{type:"input", text, source:"interactive", images}`.
-- `turn_start`, `turn_end` (`{turnIndex, message}`), `agent_start`, `agent_end`,
-  `session_stop`, `message_end`, `tool_call`, `tool_result` all fire with the
-  documented payloads.
-- **`agent_settled` did not fire in the TUI** on 19.1.0, although `agent_end`
-  did, once per run. Pi 1.5.2 fires both. The hook therefore reports completion
-  from `agent_end`, the event both harnesses emit.
-- `ctx.mode` is `"tui"` inside an `hc` terminal, `"print"` for `-p`.
-- **`pi.exec` cannot spawn from an `input` handler**: it rejects with
-  `ENOENT ... posix_spawn`. This is why the hook reports by appending a JSON line
-  to a spool file (`node:fs` works from every handler) instead of calling a
-  command.
-- **An extension that declares no flag and no shortcut is loaded only after the
-  first prompt**, so its `input` handler misses exactly that message.
-  `pi.registerFlag(...)` forces an eager load; the generated hook registers one.
-- **Ambient discovery does not honour a redirected config directory.** Setting
-  `PI_CODING_AGENT_DIR` did not make hooks under that directory load; project
-  `.omp/hooks/post/*.ts` did. agentctl therefore passes the hook with an explicit
-  `-e <path>`, which always loads and requires no edit to a user's config.
-- `pi.sendMessage({customType, content, display}, {triggerTurn:true,
-  deliverAs:"followUp"})` while idle started a real model turn that answered the
-  injected text.
-- `ctx.sessionManager.getSessionId()` returns the native session UUID.
+With a real parent, Herdr types notes into that parent's input, for example:
 
-## Pi 1.5.2 — measured extension facts
+```text
+<hc from="t6 work3" …>t6 work3 exited (exit 129). Read: hc read t6</hc>
+```
 
-Same extension shape and event names as OMP (`input`, `turn_start`, `turn_end`,
-`agent_start`, `agent_end`, `agent_settled`, `session_start`, `message_end`),
-package `@earendil-works/pi-coding-agent`. Both `agent_end` and `agent_settled`
-were observed in a TUI turn; `agent_settled` calling
-`pi.sendMessage({triggerTurn:true, deliverAs:"followUp"})` while idle produced a
-second real model turn.
+Observed in the parent's screen. Notes exist for **blocked, error and exit**.
+A child that ends its turn without reporting produces **no** note: measured, and
+confirmed by [issue #176](https://github.com/herdrdev/herdr-core/issues/176),
+whose fix ([PR #177](https://github.com/herdrdev/herdr-core/pull/177)) is open
+and not merged on 0.1.18.
 
-## Claude Code 2.1.327 — measured hook facts
+## Send
 
-Hooks come from a settings file (`--settings <file>` merges with the user's own).
-Verified payloads:
+```text
+hc send --json <t> <text>              -> {"started": true, "status": "idle", "turn": 0}
+hc send --json --if working <t> <text> -> {"error":{"kind":"status_mismatch"}}, exit 10
+hc send --json --wait <t> <text>       -> {"started": …, "wait": {"reason":"not_started", …}}
+```
 
-- `SessionStart` `{session_id, transcript_path, cwd, source:"startup"}`
-- `UserPromptSubmit` `{session_id, prompt_id, permission_mode, prompt}`
-- `Stop` `{session_id, prompt_id, stop_hook_active, last_assistant_message}`
-- `SessionEnd` `{reason}`
+- Text travels verbatim as one argv element.
+- A blocked agent is refused (exit 9) unless `--force`.
+- `started` is Herdr's answer to "did this begin a turn"; `false` means the text
+  was typed and nothing started.
+- `--wait` returns the turn's outcome; `reason: "not_started"` means no turn
+  began, which is the honest form of a delivery doubt.
 
-Verified wake: a `Stop` hook printing
-`{"decision":"block","reason":"[agentctl event] …"}` makes Claude continue the
-conversation. The transcript showed the reason arriving as `Stop hook feedback:`
-followed by a fresh assistant reply. `stop_hook_active` is `true` on the follow-up
-`Stop`, which is the recursion guard agentctl honours.
+## Turns and waits
 
-**No hook fires at turn start.** `UserPromptSubmit` is the ingress signal;
-`turn.started` is therefore not claimed for Claude.
+OSC 7501 from a program is `state=<word>:app=<name>` terminated by ST. A script
+emitting `state=working` then `state=done` produced:
 
-## What agentctl does with each surface
+```text
+status {'app': 'fake', 'state': 'working'} reported True turn 0
+status {'app': 'fake', 'state': 'done'}    reported True turn 1
+```
 
-| Job | omp | pi | claude |
-| --- | --- | --- | --- |
-| Hook asset | `-e <asset>.ts` | `-e <asset>.ts` | `--settings <fragment>.json` + script |
-| Where the asset lives | `$AGENTCTL_HOME/integrations/omp/` | `…/pi/` | `…/claude/` |
-| Records an observation | append to `$AGENTCTL_HOME/spool/omp.jsonl` | `…/pi.jsonl` | via the hook script → same spool |
-| Who ingests | any CLI command, and agentctld each tick | same | same |
+`turn` goes up when the root record leaves `working`. That is the
+agent-agnostic completion signal.
 
-Nothing agentctl installs writes to a user's own harness configuration. A
-workspace without an installed integration launches normally; its sends are
-refused unless `--force`/`--unconfirmed` is given, and then recorded as
-`delivery_unknown` rather than a fabricated success.
+```text
+hc wait --children all <parent>   -> reason "timeout" while a child works
+                                     reason "children" with children[] entries
+hc wait --children any  <parent>  -> child entry: {"status":"done","ended":true,"reason":"status"}
+```
 
-## Degradations stated plainly
+Measured: a child that reported `working → done` and sent nothing to its parent
+made `wait --children any` return with `reason: "status"` and the child's `turn`
+bumped. Herdr decides, from its own counter, with no hook and no screen parsing.
 
-- **Claude has no turn-start event.** Anything that needs "started" for Claude
-  uses the message ACK as the proxy.
-- **Codex and OpenCode have no adapter.** Sends are `delivery_unknown`; turn
-  completion is invisible because codex emits no status record.
-- **Hook identity is not a security boundary.** It prevents accidental
-  cross-workspace routing, not a malicious local process running as the same
-  Unix user.
+## Labels and names
+
+- `--label k=v`, `hc ls --label k=v`, `hc label <t> k=v`. agentctl uses
+  `agentctl.workspace`, `agentctl.session` and `agentctl.role`.
+- Names are `1-32` of `a-z 0-9 - _ .` and must not be shaped like an address
+  (`t7` is rejected). agentctl rejects such a session name at its own boundary.
+
+## What this means for agentctl
+
+| Need | Delegated call |
+| --- | --- |
+| Run and keep a Worker | `hc run --bg --parent … --outlive-parent` |
+| Deliver work | `hc send` |
+| Refuse a blocked agent | `hc send` guard |
+| Know a turn started | `hc send --wait` → `started` |
+| Know a turn ended | `hc wait --children` → `reason: "status"` |
+| Multi-Worker barrier | `hc wait --children any\|all` |
+| Status word | OSC 7501 via `hc get` |
+| Find a Worker after a restart | `hc ls --label agentctl.workspace=…` |
+
+No Worker hook, no message table, no daemon.

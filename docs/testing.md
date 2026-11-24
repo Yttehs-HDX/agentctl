@@ -17,24 +17,15 @@ Herdr Core.
 | `test_config.py` | TOML round-trip, schema validation, empty default agent |
 | `test_agents.py` | catalog resolution, disabled/missing/unknown agents, version verification |
 | `test_runtime.py` | `hc` argv shape, verbatim sends, error-kind mapping, label filters |
-| `test_session.py` | create, readiness, duplicate names, cwd policy, agent precedence, rollback, delete |
+| `test_session.py` | create, readiness, name rules, cwd policy, first task, parentage, rollback, delete |
 | `test_lifecycle.py` | status mapping, label-based terminal rediscovery, recovery rules |
-| `test_messaging.py` | delivery proof, `--force` opt-out, keys, interrupt |
+| `test_messaging.py` | send through Herdr, `--force`, `--wait`, honest `started: false`, keys, interrupt |
 | `test_prune.py` | dry run, directory/row removal, live rows and outside paths kept |
 | `test_recovery.py` | leader restart: same identity, same sessions, `recover`, isolation |
 | `test_worktree.py` | worktree creation, branch naming, cleanup policy, non-git rejection |
 | `test_cli.py` | JSON envelope and schema, `--json` argv handling, usage errors |
 | `test_discovery.py` | workspace auto-detection: precedence, nesting, symlinks, failures |
-| `test_leader.py` | lease claim, refusal, epoch, takeover fencing, expiry, concurrency |
-| `test_messages.py` | message registry: ordering, ACK, dedupe, retries, honest unknowns |
-| `test_events.py` | event log: schema, dedupe, Leader inbox, idempotent ack, pagination |
-| `test_ingest.py` | Herdr Core facts → events: turn completion, blocked, exit, isolation |
-| `test_spool.py` | hook spool: exact ACK, workspace/session binding, atomic claim |
-| `test_hooks.py` | hook entry points, Claude `Stop` wake and its recursion guard |
-| `test_integrations.py` | install idempotence, agentctl-owned assets, capability honesty |
-| `test_hook_source.py` | the generated hook loads in the real harness binary |
-| `test_daemon.py` | lease ownership, serial dispatch, fenced Leader, crash healing |
-
+| `test_leader.py` | binding: attach, refusal, Worker takeover guard, staleness from Herdr |
 `conftest.py` supplies:
 
 - `isolated_home` (autouse) — temporary `AGENTCTL_HOME`.
@@ -46,30 +37,35 @@ Herdr Core.
 
 ## Real end-to-end, isolated
 
-The CLI, the daemon and the hook all decide behaviour from `AGENTCTL_HOME`, so a
-whole run can be isolated from your real `~/.config/agentctl` and from your live
-Herdr Core:
+Run a whole scenario without touching your own terminals by giving Herdr its own
+session, and agentctl its own home:
 
 ```sh
-export AGENTCTL_HOME=/tmp/aclab
-export HC_SESSION=aclab XDG_CONFIG_HOME=/tmp/aclab/xdg \
-       XDG_RUNTIME_DIR=/tmp/aclab/run
-mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+export HC_SESSION=hv3 AGENTCTL_HOME=/tmp/hv3
+cd /tmp/project
+agentctl setup && agentctl init
 
-cd /tmp/project && agentctl setup && agentctl init
-agentctl integrations install omp
-lease=$(agentctl --json leader attach | jq -r .lease.lease_token)
-export AGENTCTL_LEASE_TOKEN=$lease
+# A Leader inside Herdr
+tc=$(hc run --bg --json --no-parent --name lead -- sleep 900 | jq -r .address)
+agentctl leader attach --terminal "$tc"
 
-agentctl create --name worker --agent omp --cwd . --wait 45
-agentctl send worker "Reply OK and stop."
-agentctl messages list           # queued → dispatched → acknowledged → running → completed
-agentctl events list
-agentctl inbox list
+# Two Workers as children of that Leader
+agentctl create --name w1 --cwd . --task "task one"
+agentctl create --name w2 --cwd . --task "task two"
+hc ls --json | jq '.terminals[] | {name, parent, die_with_parent}'
+
+hc kill "$tc"                  # the Leader's terminal dies
+hc ls --json                   # the Workers are still live
+agentctl leader status         # live: no; the binding is stale
+
+tc2=$(hc run --bg --json --no-parent --name lead2 -- sleep 900 | jq -r .address)
+agentctl leader attach --terminal "$tc2" --takeover
+agentctl list                  # the same Workers
+agentctl wait --all --timeout 30
 ```
 
-`agentctl integrations list` reports what each harness can actually do; a row
-that says `verified: false` has not been measured on this machine.
+Measured on hc 0.1.18: the Workers survive the Leader's terminal, a new Leader
+attaches, and `wait --all` is `hc wait --children all`.
 
 ## Manual end-to-end
 

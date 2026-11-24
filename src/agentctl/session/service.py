@@ -38,6 +38,15 @@ HC_NAME_MAX = 32
 _NAME_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
+def is_hc_address_shaped(name: str) -> bool:
+    """Whether Herdr would read this name as a terminal address (`t7`, `t1b`).
+
+    Measured on 0.1.18: `--name` rejects a name shaped like an address, because
+    the address and the name share one namespace in `hc get`.
+    """
+    return bool(re.fullmatch(r"t[0-9][0-9a-z]*", name))
+
+
 def _directory_size(root: Path) -> int:
     """Bytes of regular-file data, without following symlinks out of the tree."""
     total = 0
@@ -142,6 +151,11 @@ class SessionService:
             raise UsageError("session name must not be empty")
         if len(name) > 64:
             raise UsageError("session name must be at most 64 characters")
+        if is_hc_address_shaped(name):
+            raise UsageError(
+                f"session name {name!r} is shaped like a Herdr terminal address",
+                "Herdr would read it as an address; choose a name like 'worker' or 'reviewer'",
+            )
         if self.store.sessions.find_in_workspace(workspace.id, name) is not None:
             raise SessionNameConflict(
                 f"session {name!r} already exists in workspace {workspace.id}",

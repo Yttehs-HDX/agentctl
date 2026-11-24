@@ -1,22 +1,23 @@
 # agentctl
 
-Workspace-scoped agent session manager on top of [Herdr Core](https://github.com/) (`hc`).
+A thin convenience CLI over [Herdr Core](https://github.com/herdrdev/herdr-core)
+(`hc`), made for Agents to use on themselves.
 
-`agentctl` gives a Leader agent one CLI to own a pool of independent worker sessions:
-create them, dispatch work to them without blocking, act on what they report, and
-get the same pool, the same identities and the same unread events back after a
-restart.
+Herdr already runs programs in persistent terminals, gives them parents, sends
+them messages, waits for their turns and reports their status. agentctl does not
+re-implement any of that. It adds the three things an Agent needs to run a pool
+of Workers without thinking about Herdr:
 
-v0.2 turns the synchronous manager into an event-driven runtime: work is
-persisted as a message before it is sent, an acknowledgement names the exact
-message it received, and a local `agentctld` turns worker activity into events a
-Leader can act on while it is doing its own work.
+- **a Workspace** — a canonical directory with a stable identity;
+- **a Leader binding** — where this workspace's Leader is, so a restart finds the
+  same pool;
+- **Worker identities** — named sessions mapped onto Herdr terminals.
 
 ```text
 Workspace (canonical dir) ── Leader identity (stable UUID)
-   ├── researcher      omp      cwd=docs/       terminal t3   session 01a2...
-   ├── reviewer        claude   cwd=.           terminal t6   session e78c...
-   └── tester          codex    cwd=.           terminal t7   session unknown
+   ├── researcher   omp      cwd=docs/   terminal t3   session 01a2...
+   ├── reviewer     claude   cwd=.       terminal t6   session e78c...
+   └── tester       pi       cwd=.       terminal t7   session 01a9...
 ```
 
 ## Install
@@ -30,7 +31,7 @@ State lives in `~/.config/agentctl/` (`AGENTCTL_HOME` overrides):
 
 ```text
 config.toml     # global configuration (TOML)
-registry.db     # workspaces + sessions (SQLite, WAL)
+registry.db     # workspaces, sessions, the Leader binding (SQLite, WAL)
 sessions/       # per-session private dirs for agents that key sessions by directory
 ```
 
@@ -41,107 +42,108 @@ agentctl setup
 agentctl config set default-agent omp
 
 cd ~/projects/example
-agentctl init                       # registers this directory as the workspace
-agentctl integrations install omp   # the worker hook, under agentctl's own home
+agentctl init                     # register this directory as the workspace
 
-agentctl --json leader attach       # prints the lease token
-export AGENTCTL_LEASE_TOKEN=...     # present it on every mutating command
+agentctl leader attach            # from the Leader's own terminal, optional
+agentctl create --name researcher --agent omp --cwd docs --task "Map the module layout"
+agentctl create --name reviewer   --agent claude --cwd . --task "Review src/"
 
-agentctl create --name researcher --cwd docs --wait 45
-agentctl --json send researcher "Map the module layout"   # returns at once
-agentctl inbox list                 # what the worker has reported
+agentctl wait --any               # the next Worker's news
 agentctl read researcher
+agentctl send researcher "Focus on the parser only"
 agentctl list
 ```
 
-`--workspace` is no longer required: a command resolves the workspace from the
-flag, then `AGENTCTL_WORKSPACE`, then the nearest registered root at or above the
-current directory.
+`--workspace` is optional: a command resolves the workspace from the flag, then
+`AGENTCTL_WORKSPACE`, then the nearest registered root at or above the current
+directory.
 
-## What v0.2 adds
+## What agentctl does and does not do
 
-| Piece | Command | Guarantee |
-| --- | --- | --- |
-| Workspace discovery | every command | flag > env > cwd > nearest parent, canonicalized |
-| Leader lease | `leader attach\|detach\|status\|heartbeat\|takeover` | one live Leader per workspace; a superseded token stops working |
-| Message registry | `send`, `messages list\|get\|retry\|cancel` | persisted before sending; exact per-message ACK; `delivery_unknown` instead of a blind resend |
-| Event log | `events list\|watch`, `inbox list\|ack` | deduped, ordered, survives a restart |
-| Daemon | `daemon start\|stop\|status` | follows the Herdr Core event stream, dispatches and delivers |
-| Integrations | `integrations list\|inspect\|install\|uninstall` | per-harness hooks with measured capabilities |
-| Doctor | `doctor` | runtime, workspace, lease, daemon, agents and hooks in one pass |
+| Job | Who does it |
+| --- | --- |
+| Run a Worker in a terminal that stays alive | Herdr |
+| Keep a Worker alive when the Leader exits | Herdr (`--outlive-parent`) |
+| Deliver a message | Herdr (`hc send`) |
+| Refuse to type into a blocked agent | Herdr |
+| Queue the harness's own input | The harness |
+| Report whether a send started a turn | Herdr (`started`) |
+| Know when a Worker's turn ended | Herdr (`turn` counter, `hc wait`) |
+| Notify a parent that a child blocked, errored or exited | Herdr |
+| Terminal liveness | Herdr |
+| Workspace identity and path migration | agentctl |
+| Which terminal is this workspace's Leader | agentctl (a binding, not a lock) |
+| Worker names, cwd, agent, worktree | agentctl |
+| Native session ids and relaunch on recovery | agentctl |
 
-Message states, in order: `queued`, `dispatching`, `dispatched`, `acknowledged`,
-`running`, `completed`. `delivery_unknown` is a first-class outcome for a message
-that may have arrived; it is never resent automatically.
-
-## Supported harnesses
-
-| Agent | Hook | Exact ACK | Idle wake |
-| --- | --- | --- | --- |
-| `omp` 19.1.0 | extension, loaded with `-e` | yes | yes |
-| `pi` 1.5.2 | extension, loaded with `-e` | yes | yes |
-| `claude` 2.1.327 | `--settings` fragment | yes | yes (`Stop` hook) |
-| `codex`, `opencode` | none verified | no | no |
-
-Codex and OpenCode stay out of scope: no verified hook, and codex emits no status
-record for the runtime fallback either. Their sends are `delivery_unknown`.
-
-See [docs/runtime-capabilities.md](docs/runtime-capabilities.md) for what was
-measured, and [skills/agentctl-leader/SKILL.md](skills/agentctl-leader/SKILL.md)
-for how a Leader is expected to drive a pool.
-
-After the Leader exits and comes back, the same commands find the same workspace,
-the same sessions and the same terminals.
+There is no message queue, no event bus, no daemon and no Worker hook. A Worker
+is an ordinary Herdr terminal.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
 | `setup [--default-agent ID] [--force]` | One-time machine setup |
-| `leader attach\|detach\|status\|heartbeat\|takeover` | Workspace Leader lease |
-| `messages list\|get\|retry\|cancel` | The durable message registry |
-| `events list\|watch` / `inbox list\|ack` | Event log and Leader inbox |
-| `daemon start\|stop\|status` | The local `agentctld` service |
-| `integrations list\|inspect\|install\|uninstall` | Harness hooks |
-| `doctor` | One-pass health check |
-| `init` | Create/load the workspace identity for `--workspace` (idempotent) |
+| `init` | Create/load the workspace identity for the current directory (idempotent) |
 | `info` | Workspace id, leader id, counts, default agent, runtime status |
 | `rebind NEW` | Move this workspace identity to another directory |
-| `list [--all]` | Sessions of this workspace |
-| `create --name N --cwd DIR [--agent ID] [--mode shared\|worktree] [--base-ref REF] [--wait S]` | New worker session |
+| `list [--all] [--no-refresh]` | Sessions of this workspace |
+| `create --name N --cwd DIR [--agent ID] [--task TEXT] [--mode shared\|worktree] [--wait S]` | New Worker |
 | `delete NAME [--keep-worktree]` | Kill the agent, clean the terminal, retire the record |
 | `prune [--dry-run]` | Reclaim agentctl-owned state of soft-deleted sessions |
-| `send NAME TEXT` / `send NAME -` | Send a message (stdin keeps bytes intact) |
-| `keys NAME KEY [KEY...]` | Send named keys (answer trust/permission dialogs) |
-| `interrupt NAME [--timeout S]` | Interrupt the agent (ctrl+c) |
-| `read NAME [--lines N] [--follow]` | Screen + history |
-| `status [NAME]` | Session or workspace status |
-| `wait NAME [--timeout S]` | Wait until the agent stops working |
+| `send NAME TEXT [--force] [--wait] [--timeout S]` | Send text through Herdr |
+| `keys NAME KEY [KEY...]` | Answer a trust or permission dialog |
+| `interrupt NAME [--timeout S]` | Interrupt the agent's current turn |
+| `read NAME [--lines N] [--follow]` | Screen plus history |
+| `status [NAME] [--no-refresh]` | Session or workspace status |
+| `wait NAME [--timeout S]` / `wait --any` / `wait --all` | One turn, or the Workers' next news |
 | `recover [NAME]` | Re-discover terminals, or relaunch from a native session id |
+| `leader attach\|detach\|status` | Where this workspace's Leader runs |
 | `agents list\|inspect ID` | Catalog with measured capabilities |
 | `config set\|get\|list` | `default-agent`, `session.default-mode`, `agents.<id>.enabled` |
 
-Every command accepts `--json`. `--workspace` is optional; without it the
-workspace comes from `AGENTCTL_WORKSPACE` or the nearest registered root at or
-above the current directory.
+Every command accepts `--json`.
 
-## Status words
+## Four words worth knowing
 
-`starting`, `idle`, `working`, `waiting`, `completed`, `failed`, `stopped`,
-`unknown`, `unreachable`.
+- `starting`, `idle`, `working`, `waiting`, `completed`, `failed`, `stopped`,
+  `unknown`, `unreachable` — the same words v0.1 used, derived from Herdr's own
+  status records. An agent that reports no status is `unknown`, never guessed.
+- `started: false` from `send` means the text was typed but no turn began (a
+  booting agent, or a dialog). It is a doubt, not a success and not a failure.
+- `wait --any` returns on the next Worker's new turn, a block, an error or an
+  exit. `wait --all` returns when no Worker is working. Both are `hc wait
+  --children`, so Herdr decides.
+- A Worker whose terminal is lost is `unreachable`, and `recover` relaunches it
+  only from a native session id the catalog says is resumable.
 
-Status comes from the agent's own Herdr Core status records. An agent that does not
-report status is `unknown` — never guessed from the screen.
+## Two limits stated plainly
+
+1. **A child that ends its turn without reporting does not wake an idle parent.**
+   That is Herdr issue [#176], with PR [#177] still open on 0.1.18. A Leader
+   inside Herdr therefore hears about `blocked`, `error` and `exit`
+   automatically, and hears about a quiet turn end when it calls `wait --any` or
+   `wait --all`. agentctl does not paper over this with a hook or a message
+   table; if you need to be woken per turn without waiting, follow the upstream
+   issue.
+2. **The Leader binding is a pointer, not a lock.** Two Leaders are prevented by
+   using the same binding, not by a token. `leader status` compares the binding
+   with what Herdr says about that terminal, so a stale binding is visible
+   instead of expiring silently.
+
+[#176]: https://github.com/herdrdev/herdr-core/issues/176
+[#177]: https://github.com/herdrdev/herdr-core/pull/177
 
 ## Security boundary
 
-`--cwd` must exist, resolve through symlinks to its real path, and stay inside the
-workspace root. Agent commands come from the catalog only. `--cwd` is a scoping
+`--cwd` must exist, resolve through symlinks to its real path, and stay inside
+the workspace root. Agent commands come from the catalog only. That is a scoping
 constraint, not an OS sandbox.
 
 ## Docs
 
-- [docs/runtime-capabilities.md](docs/runtime-capabilities.md) — measured Herdr Core behaviour
-- [docs/architecture.md](docs/architecture.md) — modules, data model, recovery, lease, message lifecycle
+- [docs/runtime-capabilities.md](docs/runtime-capabilities.md) — measured Herdr behaviour
+- [docs/architecture.md](docs/architecture.md) — modules, data model, delegation
 - [docs/cli.md](docs/cli.md) — full CLI reference
 - [docs/testing.md](docs/testing.md) — how to run the tests
+- [docs/v0.3-report.md](docs/v0.3-report.md) — what this refactor removed and why

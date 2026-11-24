@@ -9,6 +9,7 @@ import pytest
 from agentctl.config import default_config
 from agentctl.errors import (
     AgentNotConfigured,
+    UsageError,
     AgentUnknown,
     InvalidPath,
     SessionNameConflict,
@@ -19,6 +20,23 @@ from agentctl.session.service import CreateRequest, SessionService
 from agentctl.storage import Store, open_connection
 from agentctl.workspace.resolver import WorkspaceResolver
 import agentctl.agents.detector as detector
+from tests.conftest import calls
+
+
+def _last_run_argv() -> list[str]:
+    """The most recent `hc run` invocation, ignoring status refreshes."""
+    return [call for call in calls(_fake_hc_state()) if call and call[0] == "run"][-1]
+
+
+def _fake_hc_state() -> Path:
+    """The fake hc's state file, derived from PATH (it lives beside the script)."""
+    import os
+
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
+        candidate = Path(entry) / "hc"
+        if candidate.exists() and "fake-hc-state.json" in candidate.read_text(errors="ignore"):
+            return candidate.parent.parent / "fake-hc-state.json"
+    raise AssertionError("the fake hc is not on PATH")
 
 
 @pytest.fixture()
@@ -238,3 +256,52 @@ def test_create_wait_uses_the_requested_timeout(
     )
     assert seen == [2.5]
     assert result.ready is True
+
+
+def test_address_shaped_names_are_rejected(setup, workspace: Path) -> None:
+    """Herdr shares one namespace between names and addresses.
+
+    Measured on 0.1.18: `--name t7` is refused, so a session called `t7` must
+    fail at the agentctl boundary with a hint instead of a raw runtime error.
+    """
+    from agentctl.session.service import is_hc_address_shaped
+
+    service, store, ws, _config = setup
+    for bad in ("t7", "t1", "t12b"):
+        assert is_hc_address_shaped(bad) is True
+    for good in ("worker", "t", "task7", "reviewer"):
+        assert is_hc_address_shaped(good) is False
+
+    with pytest.raises(UsageError) as excinfo:
+        service.create(ws, CreateRequest(name="t7", agent="omp", cwd=str(workspace)))
+    assert "shaped like a Herdr terminal address" in excinfo.value.message
+
+
+def test_first_task_is_passed_at_launch(setup, workspace: Path) -> None:
+    """A task at launch is not a send: a booting agent cannot drop it."""
+    service, store, ws, _config = setup
+    service.create(
+        ws, CreateRequest(name="worker", agent="omp", cwd=str(workspace), task="map the layout")
+    )
+    argv = _last_run_argv()
+    after_dash = argv[argv.index("--") + 1 :]
+    assert after_dash[-1] == "map the layout"
+
+
+def test_worker_is_parented_to_the_leader_and_outlives_it(setup, workspace: Path) -> None:
+    """`--parent` gives Herdr's notes, `--outlive-parent` keeps it alive."""
+    service, store, ws, _config = setup
+    service.create(ws, CreateRequest(name="lone", agent="omp", cwd=str(workspace)))
+    alone = _last_run_argv()
+    assert "--no-parent" in alone, "no Leader bound, so no parent"
+    assert "--outlive-parent" in alone
+
+    store.conn.execute(
+        "INSERT INTO leader_bindings(workspace_id, leader_id, terminal, native_session_id,"
+        " attached_at, updated_at) VALUES(?,?,?,?,?,?)",
+        (ws.id, ws.leader_id, "t1", None, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+    )
+    service.create(ws, CreateRequest(name="child", agent="omp", cwd=str(workspace)))
+    with_leader = _last_run_argv()
+    assert with_leader[with_leader.index("--parent") + 1] == "t1"
+    assert "--outlive-parent" in with_leader

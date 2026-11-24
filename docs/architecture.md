@@ -3,28 +3,29 @@
 ## Layers
 
 ```text
-cli.py                     parse args, render one result, choose exit code
-├── workspace/             identity: canonical paths, UUIDs, info
-│   ├── resolver.py        path → realpath → registry lookup/create
+cli.py                     parse args, resolve the workspace, render one result
+├── workspace/             identity: canonical paths, UUIDs, discovery
+│   ├── discovery.py       flag > env > cwd > nearest registered parent
+│   ├── resolver.py        path -> realpath -> registry lookup/create
 │   └── service.py         init / info / rebind
+├── leader/                the binding: which terminal leads this workspace
 ├── session/               lifecycle
-│   ├── service.py         create, delete, get, list, recover
-│   ├── lifecycle.py       runtime facts → agentctl status
-│   ├── messaging.py       send / read / follow / wait
+│   ├── service.py         create, delete, get, list, recover, prune
+│   ├── lifecycle.py       runtime facts -> agentctl status
+│   ├── messaging.py       send / keys / interrupt / read / waits
 │   └── worktree.py        git worktree per session
-├── agents/                catalog
+├── agents/                catalog: declarative launch and resume flags
 │   ├── definitions.py     measured capabilities per agent id
 │   ├── detector.py        is the binary installed, what version
-│   └── catalog.py         config + definitions + detection → spec
+│   └── catalog.py         config + definitions + detection -> spec
 ├── runtime/               terminal substrate
 │   ├── base.py            RuntimeAdapter interface
 │   └── herdr_core.py      the only module that knows `hc`
 ├── storage/               persistence
 │   ├── database.py        connection, schema, migrations, transactions
 │   ├── models.py          dataclasses travelling between layers
-│   └── repository.py      SQL for workspaces and sessions
+│   └── repository.py      SQL for workspaces, sessions, the leader binding
 ├── config/                config.toml schema, load, save
-<!---->
 └── errors.py              every failure has a code, hint and exit status
 ```
 
@@ -33,125 +34,102 @@ Rules kept by the code:
 - The CLI never issues SQL and never builds an `hc` command.
 - `runtime/` never reads the registry.
 - `session/` is the only layer that owns both a `Session` and a
-  `RuntimeAdapter`, and it is the only place that maps runtime facts to status.
+  `RuntimeAdapter`, and the only place that maps runtime facts to status.
 - `workspace/` knows nothing about agents or terminals.
+- `leader/` knows about one terminal and nothing about Workers.
 
-## v0.2: event-driven orchestration
+## Delegation to Herdr
 
-v0.1 answered "what is this session doing right now". v0.2 answers "what happened
-while I was busy", which needs three things v0.1 did not have: an identity for
-the Leader that can be lost, a durable record of each dispatched message, and a
-process that listens when no CLI command is running.
+The guiding rule: if Herdr already does it, agentctl calls Herdr. The wrapper
+only adds what Herdr has no concept of.
 
-```text
-cli.py
-├── workspace/discovery.py     flag > env > cwd > nearest registered parent
-├── leader/service.py          lease, epoch, token, fencing
-├── messaging/
-│   ├── transitions.py         the legal state machine, testable without SQL
-│   └── service.py             enqueue, dispatch, ACK, complete, honest unknowns
-├── events/
-│   ├── bus.py                 append-only log + Leader inbox, dedupe by key
-│   └── ingest.py              Herdr Core terminal facts → agentctl events
-├── spool.py                   hook observations → registry (atomic claim)
-├── integrations/              per-harness hook assets and capabilities
-├── daemon/service.py          agentctld: stream, lease, dispatch, delivery
-└── diagnostics.py             doctor
-```
-
-Rules kept by the new code:
-
-- `messaging/transitions.py` owns the state vocabulary; no service invents one.
-- Only `integrations/` knows a harness's event names.
-- Only `events/ingest.py` maps runtime facts to events, and it is pure.
-- The daemon composes services; it holds no state the database does not.
-
-## Leader lease
-
-`leader_leases` has one row per workspace, so SQLite's own write serialization
-arbitrates a claim. The row carries `leader_instance_id`, `leader_epoch`,
-`lease_token` and `expires_at`.
+| Concern | Owner | Where |
+| --- | --- | --- |
+| Terminal lifecycle, persistence, recovery of lost programs | Herdr | `hc run`, `hc keep` |
+| Worker survival after the Leader ends | Herdr | `--outlive-parent` |
+| Parent/child relation and native child notes | Herdr | `--parent` |
+| Message delivery, blocked-agent guard, readiness | Herdr | `hc send`, `--force`, `--wait` |
+| Turn counting and completion | Herdr | OSC 7501 `turn`, `hc wait`, `hc wait --children` |
+| Status words | Herdr | OSC 7501 `status` |
+| Workspace identity, path migration | agentctl | `workspace/` |
+| Which terminal is the Leader | agentctl | `leader/` |
+| Worker names, agents, worktrees, native ids | agentctl | `session/` |
 
 ```text
-attach   no live lease, or the same instance  → claim / renew, epoch unchanged
-attach   a live lease held by someone else     → LeaderConflict
-takeover forced                                → epoch + 1, new token
-expire   renewed_at + lease_seconds passed     → claimable again
+cli.py                    parse args, resolve the workspace, render one result
+├── workspace/             canonical paths, stable ids, discovery
+├── leader/                binding: workspace -> terminal + native session
+├── session/
+│   ├── service.py         create, delete, get, list, recover, prune
+│   ├── lifecycle.py       runtime facts -> agentctl status (pure)
+│   ├── messaging.py       send, keys, interrupt, read, waits
+│   └── worktree.py        one git worktree per session
+├── agents/                declarative launch/resume flags per agent
+├── runtime/
+│   ├── base.py            RuntimeAdapter interface
+│   └── herdr_core.py      the only module that knows `hc`
+└── storage/               workspaces, sessions, the leader binding
 ```
 
-Fencing is `authorize()`: once a lease exists, a mutating command must present
-its token, and an old token fails because the stored epoch moved on. Before any
-lease exists the workspace is unclaimed, so single-operator use is unchanged.
+## Leader binding
 
-## Message lifecycle
+A row in `leader_bindings`: `workspace_id → terminal, native_session_id`. No
+token, no epoch, no expiry.
+
+- `leader attach` records the terminal (`$HC_TERMINAL_ID` by default), labels it
+  `agentctl.role=leader`, and refuses a terminal already bound to another
+  workspace, or one carrying `agentctl.role=worker`.
+- `leader status` asks Herdr whether that terminal is live. A finished terminal
+  means the binding is stale, so any Leader may attach; nothing has to expire.
+- `leader detach` forgets the row. The terminal keeps running.
+
+v0.2 had a lease with expiring tokens and epoch fencing. It was removed because
+it re-implemented a supervisor: Herdr already knows whether a terminal is alive,
+and the lease's failure modes (renewals, epochs, "who holds it now") were cost
+without a guarantee an OS boundary could back.
+
+## Workers are Herdr children
 
 ```text
-queued ─dispatch─▶ dispatching ─accepted─▶ dispatched ─ACK─▶ acknowledged
-   ▲                    │                      │                  │
-   └──refused───────────┘                      │                  ▼
-                                               │               running
-                                               ▼                  │
-                                        delivery_unknown          ▼
-                                                          completed / failed
+agentctl create --name w1 --cwd . --task "do X"
+  └─ hc run --bg --name ac-w1-<id6> --cwd . \
+        --parent <leader terminal> --outlive-parent \
+        --label agentctl.workspace=<ws> --label agentctl.session=<sess> \
+        --label agentctl.role=worker -- <agent argv> "do X"
 ```
 
-- The row is written **before** the text is sent, and `dispatching` is committed
-  before the transport call. A crash in that window leaves a row the sweep turns
-  into `delivery_unknown`, never into a silent retry.
-- One message is in flight per session (a partial unique index); queued messages
-  wait. That is what makes per-worker ordering real, while workers stay parallel.
-- An ACK names a message id. The hook reads it out of the text it received, so
-  the ACK proves *that* message arrived, not merely that the worker was idle.
-- `retry` refuses `delivery_unknown` on purpose: the text may already be in the
-  worker's context.
+- `--parent` gives the Worker Herdr's native notes (blocked, error, exit) into
+  the Leader's terminal.
+- `--outlive-parent` keeps the Worker alive when the Leader's program ends.
+- `--task` appends the first message at launch, so a booting agent never drops
+  it.
+- The labels are the durable link: a restarted Leader finds its Workers by
+  `agentctl.workspace=<ws>`, independent of terminal addresses.
 
-## Hooks report through a spool, not a subprocess
+With no Leader bound the Worker is parentless: it loses the notes but never its
+survival.
 
-Measured on OMP 19.1.0: `pi.exec` cannot spawn from an `input` handler
-(`ENOENT ... posix_spawn`), and an extension that declares no flag is loaded only
-after the first prompt. So the generated hook:
-
-- registers a flag, forcing an eager load;
-- appends one JSON line per observation to `$AGENTCTL_HOME/spool/<agent>.jsonl`
-  (`node:fs` works from every handler);
-- never throws into the host.
-
-Any CLI command and the daemon drain that spool. A drain `rename`s the file
-before reading it, so one reader owns each record and a concurrent append always
-lands in a fresh file. Ingest re-checks workspace and session, so a record can
-never mark another session's message delivered.
-
-## Event model
+## Waits
 
 ```text
-{"schema_version": 1, "event_id": "evt_…", "event": "turn.completed",
- "workspace_id": "ws_…", "session_id": "sess_…", "message_id": "msg_…",
- "leader_epoch": 1, "source": "omp", "severity": "info",
- "timestamp": "2026-11-25T00:00:00+00:00", "payload": {}, "dedupe_key": "…"}
+agentctl wait NAME      → hc wait <terminal>          one session's turn
+agentctl wait --any     → hc wait --children any      next news from any Worker
+agentctl wait --all     → hc wait --children all      until no Worker is working
 ```
 
-`turn.completed` means the worker's conversation turn ended. It does **not**
-mean the task succeeded; the result text is in the payload and the judgement
-stays with the Leader.
+`WaitOutcome.turn_ended` is `reason == "status"`: Herdr saw the child leave
+`working`. That is the agent-agnostic completion signal, verified on 0.1.18 with
+a scripted harness that reported `working → done` and never sent anything.
 
-Leader-relevant events also get an `inbox` row. Delivery is a harness wake where
-one exists (`Stop` hook returning `decision: "block"`, or
-`sendMessage({triggerTurn: true})` at settle); otherwise the row simply waits.
-Dedupe is `(workspace, event, dedupe_key)`, so a replayed hook is a no-op.
+`reason: timeout` is a check-in, never a failure.
 
-## agentctld
+## Known upstream limit
 
-One supervised process per workspace, started with `agentctl daemon start`:
-
-```text
-loop:  ingest spool → dispatch queued → run outbox → deliver inbox → sleep 1 s
-bg:    hc events --json --label agentctl.workspace=<id>, reconnecting on loss
-       heartbeat the lease every lease_seconds / 3
-```
-
-A restart re-reads `outbox`/`inbox`, so crash recovery is "the work is still
-pending", not a replay of side effects. A lost lease stops dispatch: a fenced
-Leader must not act.
+A child that ends its turn without `hc send` does not wake an idle parent.
+Herdr types notes for blocked, error and exit only; issue #176 asks for the turn
+end too, and PR #177 is open but not merged on 0.1.18. A Leader therefore learns
+about a quiet turn end by calling `wait --any`, and nothing in agentctl invents a
+second notification path to hide that.
 
 ## Data model
 
@@ -164,22 +142,22 @@ sessions(id PK, workspace_id FK, name, agent, cwd, mode,
          worktree_path, worktree_branch, git_root, runtime_started_at,
          status, last_error, created_at, updated_at, deleted_at,
          UNIQUE(workspace_id, name) WHERE deleted_at IS NULL)
+
+leader_bindings(workspace_id PK FK, leader_id, terminal, native_session_id,
+                attached_at, updated_at)
 ```
 
-The agent catalog is recomputed from config, measured definitions and local
-detection on every call; it is not persisted.
-
-- `workspaces.id` is `ws_<uuid4hex>`; `leader_id` is `leader_<uuid4hex>`.
-  Neither is derived from the path: a moved/renamed directory keeps its identity
-  until `rebind` says otherwise, and the same path always resolves to the same
-  pair after a restart.
-- `sessions.id` is `sess_<uuid4hex>` and never equals a terminal address.
-- The partial unique index on `(workspace_id, name)` lets a name be reused after
-  a session is deleted while still blocking duplicates among live sessions.
+- Only agentctl's own facts live here. Herdr owns terminal state, status and
+  turn counts; they are queried, never mirrored.
+- `workspaces.id` is `ws_<uuid4hex>` and `leader_id` is `leader_<uuid4hex>`.
+  Neither is derived from the path, so a moved directory keeps its identity
+  until `rebind` says otherwise.
+- `sessions.id` is `sess_<uuid4hex>`, never equal to a terminal address.
 - `deleted_at` is a soft delete: history and native ids stay readable.
-- WAL + `busy_timeout`; every multi-statement change runs inside
-  `BEGIN IMMEDIATE`. `ALTER TABLE` migrations run at open time so an existing
-  `registry.db` survives upgrades.
+- Schema version 4 drops the v0.2 tables (`messages`, `events`, `inbox`,
+  `outbox`, `consumer_offsets`, `integrations`, `leader_leases`). Workspaces and
+  sessions are migrated in place, so an upgraded registry keeps its identity and
+  its Worker list.
 
 ## Session creation
 
@@ -190,15 +168,20 @@ detection on every call; it is not persisted.
 4  validate cwd: realpath, exists, is a dir, inside workspace root
 5  mode == worktree ? git worktree add -b agentctl/<slug>-<id8> .agentctl/worktrees/<id>
 6  insert the registry row (status=starting)
-7  hc run --bg --json --no-parent --name ac-<slug>-<id6> --cwd <cwd> \
-        --label agentctl.workspace=... --label agentctl.session=... -- <argv>
+7  hc run --bg --json --name ac-<slug>-<id6> --cwd <cwd> \
+        --parent <leader terminal> --outlive-parent \
+        --label agentctl.workspace=... --label agentctl.session=... \
+        --label agentctl.role=worker -- <argv> [first task]
 8  persist terminal address; capture native session id when the agent writes one
 9  anything failing at 5 or 7 rolls the row (and worktree) back
 ```
 
-`--no-parent` is not cosmetic: measured on hc 0.1.18, a terminal started from
-inside another HC terminal inherits `die_with_parent=true`. Without the flag
-every worker would die when the Leader's own terminal closes.
+A Worker is deliberately a child of the Leader's terminal *and* allowed to
+outlive it. Measured on hc 0.1.18: `--parent` alone sets `die_with_parent=true`,
+which would kill every Worker when the Leader's terminal closes;
+`--outlive-parent` keeps `parent=<leader>` while `die_with_parent` becomes false.
+The relation therefore survives for Herdr's native notes, and the Worker
+survives the Leader.
 
 Agent argv is built from the catalog entry plus the measured session-id flags:
 
@@ -264,25 +247,18 @@ action, and even then the row is soft-deleted.
 
 ## Messaging
 
-- `send` requires proof of delivery: it resolves the terminal, rejects agents
-  whose catalog definition has `integration = false` immediately, waits up to
-  15 s for a status report, and fails with `DeliveryUnconfirmed` (exit 8) if the
-  agent never reports. `--force` is the explicit opt-out and reports
-  `confirmed: false`. Text is passed as a single argv element so quotes, `$VAR`,
-  leading `-` and embedded newlines arrive verbatim.
-- `keys` and `interrupt` expose Herdr Core's `hc keys` and `hc interrupt` for
-  trust/permission dialogs and cancellation. Both resolve the live terminal
-  without a readiness wait; key names starting with `-` are rejected at the
-  service boundary.
-- `prune` reclaims state agentctl owns for this workspace's soft-deleted rows:
-  it removes `native_session_dir` trees only when they are direct children of
-  `session_state_dir()`, then hard-deletes the row. Worktrees and branches are
-  never touched; agent-global native session stores are out of scope.
-- `read` reports `complete`/`why` from HC so partial history (agent busy,
+- `send` resolves the session's terminal and calls `hc send`. Text travels as
+  one argv element, so quotes, `$VAR`, a leading `-` and embedded newlines
+  arrive verbatim.
+- Herdr's guard is kept: a blocked agent is refused unless `--force`, and a
+  finished terminal is an error, not a silent no-op.
+- `--wait` passes to `hc send --wait`, which returns the turn it started.
+  `started: false` in the result means no turn began; agentctl reports that
+  rather than claiming delivery.
+- `keys` and `interrupt` expose `hc keys` and `hc interrupt`. Key names starting
+  with `-` are rejected at the service boundary.
+- `read` reports `complete`/`why` from Herdr, so partial history (a busy agent, a
   full-screen app) is labelled rather than silently truncated.
-- `wait` is HC's own wait: it returns on a status change, on exit, or on a
-  timeout check-in (`ended: false`), and never fabricates completion. For agents
-  that do not report status (codex) it waits for the process to exit.
 
 ## Worktree policy
 

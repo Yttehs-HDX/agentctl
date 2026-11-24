@@ -40,6 +40,9 @@ class AgentDefinition:
     resume_flag: str | None = None
     notes: str = ""
     resume_verified: bool = False
+    # Version this entry's capabilities were measured against. `None` means the
+    # capability was not tied to a specific release.
+    verified_with: str | None = None
     extra_args: list[str] = field(default_factory=list)
 
 
@@ -53,6 +56,7 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         session_dir_flag="--session-dir",
         resume_flag="--resume",
         resume_verified=True,
+        verified_with="19.1.0",
         notes="reports idle/working/done; --resume <id> restores context (verified)",
     ),
     "pi": AgentDefinition(
@@ -77,6 +81,7 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         resume_flag="--resume",
         supports_resume=True,
         resume_verified=True,
+        verified_with="2.1.327",
         notes="--session-id <uuid> is the stored session; first launch may block on a trust prompt",
     ),
     "codex": AgentDefinition(
@@ -85,6 +90,7 @@ AGENT_DEFINITIONS: dict[str, AgentDefinition] = {
         integration=False,
         session_id="none",
         supports_resume=False,
+        verified_with="0.146.0",
         notes="does not emit HC status records and offers no way to pin a session id at launch; "
         "status stays unknown and native ids are not captured in v0.1",
     ),

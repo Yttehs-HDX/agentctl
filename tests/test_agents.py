@@ -84,14 +84,12 @@ def test_agent_with_no_definition_cannot_be_resolved(monkeypatch: pytest.MonkeyP
         resolve(config, "my-agent")
 
 
-def test_catalog_rows_are_persisted(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import agentctl.agents.detector as detector
-    from agentctl.agents.catalog import sync_catalog
-    from agentctl.storage import open_database
+def test_version_verified_compares_the_measured_release() -> None:
+    from agentctl.agents.catalog import version_verified
+    from agentctl.agents.definitions import AGENT_DEFINITIONS
 
-    monkeypatch.setattr(detector, "installed", lambda d: True)
-    with open_database() as conn:
-        sync_catalog(conn, default_config())
-        rows = conn.execute("SELECT id, enabled FROM agent_catalog ORDER BY id").fetchall()
-    assert [row["id"] for row in rows] == ["claude", "codex", "omp", "opencode", "pi"]
-    assert all(row["enabled"] == 1 for row in rows)
+    omp = AGENT_DEFINITIONS["omp"]
+    assert version_verified(omp, "omp/19.1.0") is True
+    assert version_verified(omp, "omp/19.1.1") is False
+    assert version_verified(AGENT_DEFINITIONS["pi"], "1.5.2") is None
+    assert version_verified(omp, None) is None

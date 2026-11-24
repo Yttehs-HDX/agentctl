@@ -1,8 +1,7 @@
 """Read and write config.toml.
 
 Python 3.11+ ships tomllib for reading; writes go through a tiny serializer so
-the file keeps a stable, human-editable shape (tomli-w would reorder nothing,
-but it also emits inline tables for nested writers we do not want).
+the file keeps a stable, human-editable shape with one table per section.
 """
 
 from __future__ import annotations

@@ -54,7 +54,7 @@ the same sessions and the same terminals.
 | `info` | Workspace id, leader id, counts, default agent, runtime status |
 | `rebind NEW` | Move this workspace identity to another directory |
 | `list [--all]` | Sessions of this workspace |
-| `create --name N --cwd DIR [--agent ID] [--mode shared\|worktree] [--base-ref REF]` | New worker session |
+| `create --name N --cwd DIR [--agent ID] [--mode shared\|worktree] [--base-ref REF] [--wait S]` | New worker session |
 | `delete NAME [--keep-worktree]` | Kill the agent, clean the terminal, retire the record |
 | `prune [--dry-run]` | Reclaim agentctl-owned state of soft-deleted sessions |
 | `send NAME TEXT` / `send NAME -` | Send a message (stdin keeps bytes intact) |

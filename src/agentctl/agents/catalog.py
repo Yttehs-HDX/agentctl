@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import json
-import sqlite3
-from datetime import datetime, timezone
-
 from agentctl.agents import detector
 from agentctl.agents.definitions import AGENT_DEFINITIONS, AgentDefinition
 from agentctl.config.schema import Config
@@ -90,31 +86,13 @@ def definition_for(agent_id: str) -> AgentDefinition:
     return definition
 
 
-def sync_catalog(conn: sqlite3.Connection, config: Config) -> None:
-    """Persist the resolved catalog for inspection and history."""
-    now = datetime.now(timezone.utc).isoformat()
-    for spec in list_specs(config):
-        capabilities = {
-            "supports_native_session": spec.supports_native_session,
-            "supports_resume": spec.supports_resume,
-            "integration": spec.integration,
-            "notes": spec.notes,
-        }
-        conn.execute(
-            """
-            INSERT INTO agent_catalog(id, command_json, enabled, capabilities_json, updated_at)
-            VALUES(?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                command_json = excluded.command_json,
-                enabled = excluded.enabled,
-                capabilities_json = excluded.capabilities_json,
-                updated_at = excluded.updated_at
-            """,
-            (
-                spec.id,
-                json.dumps(spec.command),
-                1 if spec.enabled else 0,
-                json.dumps(capabilities),
-                now,
-            ),
-        )
+def version_verified(definition: AgentDefinition, installed_version: str | None) -> bool | None:
+    """Whether the installed version matches the one capabilities were measured on.
+
+    `None` means there is nothing to compare: no measured version or the binary
+    did not report one. A mismatch is a warning, never a refusal: agents update
+    on their own schedule.
+    """
+    if not definition.verified_with or not installed_version:
+        return None
+    return definition.verified_with in installed_version

@@ -47,9 +47,10 @@ sessions(id PK, workspace_id FK, name, agent, cwd, mode,
          worktree_path, worktree_branch, git_root, runtime_started_at,
          status, last_error, created_at, updated_at, deleted_at,
          UNIQUE(workspace_id, name) WHERE deleted_at IS NULL)
-
-agent_catalog(id PK, command_json, enabled, capabilities_json, updated_at)
 ```
+
+The agent catalog is recomputed from config, measured definitions and local
+detection on every call; it is not persisted.
 
 - `workspaces.id` is `ws_<uuid4hex>`; `leader_id` is `leader_<uuid4hex>`.
   Neither is derived from the path: a moved/renamed directory keeps its identity

@@ -84,7 +84,7 @@ deleted history (never refreshed from the runtime).
 
 ```text
 agentctl --workspace PATH create --name NAME --cwd DIR
-        [--agent ID] [--mode shared|worktree] [--base-ref REF]
+        [--agent ID] [--mode shared|worktree] [--base-ref REF] [--wait SECONDS]
 ```
 
 - `--name` unique among live sessions of this workspace.
@@ -96,8 +96,11 @@ agentctl --workspace PATH create --name NAME --cwd DIR
   `worktree` requires a git repository and creates
   `.agentctl/worktrees/<session id>` on branch
   `agentctl/<slug>-<session id prefix>`.
+- `--wait SECONDS` waits for the agent's first status report. Without it,
+  `create` returns as soon as the terminal exists. The `ready` field says
+  whether the agent has reported; `send` remains the hard delivery gate.
 
-Prints the session id, agent, cwd, mode and terminal address.
+Prints the session id, agent, cwd, mode, terminal address and readiness.
 
 ## delete
 
@@ -217,9 +220,12 @@ agentctl agents list
 agentctl agents inspect ID
 ```
 
-`list` shows every configured agent: enabled, installed, whether it reports
-status words, whether resume is supported. `inspect` adds version, session-id
-strategy, resume verification and notes.
+`list` shows every configured agent: enabled, installed, whether the installed
+version matches the release capabilities were measured on, whether it reports
+status words, and whether resume is supported. `inspect` adds version,
+`version_verified`, session-id strategy, resume verification and notes. A
+version mismatch is a warning, never a refusal. `setup` marks such an agent
+`installed (unverified)`.
 
 ## config
 

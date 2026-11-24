@@ -61,6 +61,7 @@ class CreateResult:
     session: Session
     terminal: TerminalInfo
     native_session_id: str | None
+    ready: bool = False
 
 
 @dataclass(slots=True)
@@ -126,7 +127,13 @@ class SessionService:
 
     # ------------------------------------------------------------------ create
 
-    def create(self, workspace: Workspace, request: CreateRequest) -> CreateResult:
+    def create(
+        self,
+        workspace: Workspace,
+        request: CreateRequest,
+        *,
+        wait_timeout: float = 0.0,
+    ) -> CreateResult:
         name = request.name.strip()
         if not name:
             raise UsageError("session name must not be empty")
@@ -236,7 +243,32 @@ class SessionService:
                     updated_at=now(),
                 )
         self.store.workspaces.touch(workspace.id, now())
-        return CreateResult(session=session, terminal=terminal, native_session_id=session.native_session_id)
+        return CreateResult(
+            session=session,
+            terminal=terminal,
+            native_session_id=session.native_session_id,
+            ready=self._wait_ready(session, wait_timeout),
+        )
+
+    def _wait_ready(self, session: Session, timeout: float) -> bool:
+        """Whether the agent has reported status; optionally wait for it.
+
+        A created terminal is not a usable worker yet. `--wait` lets a Leader
+        pay the boot time here instead of discovering it on the first send.
+        """
+        if timeout > 0:
+            try:
+                self.lifecycle.wait_until_ready(session, timeout=timeout)
+            except RuntimeFailure:
+                return False
+            # `--wait` promises a usable worker; persist the status it reached
+            # so `ready: true` and the row do not disagree.
+            self.lifecycle.refresh(session)
+        try:
+            terminal = self.lifecycle.find_terminal(session)
+        except RuntimeFailure:
+            return False
+        return bool(terminal and terminal.live and terminal.reported)
 
     # -------------------------------------------------------------- native ids
 
@@ -336,6 +368,7 @@ class SessionService:
         session.status = "stopped"
         session.last_error = kept_worktree_note
         session.deleted_at = now()
+        session.hc_terminal_id = None
         self.store.workspaces.touch(workspace.id, now())
         return session
 
@@ -447,6 +480,9 @@ class SessionService:
         session.hc_terminal_id = new_terminal.address
         session.hc_name = new_terminal.name
         session.status = "starting"
+        # A relaunch is not proof of life: re-derive once so a process that
+        # exits immediately is reported as failed instead of "resumed".
+        self.lifecycle.refresh(session)
         return session, "resumed"
 
     def recover_workspace(self, workspace: Workspace) -> list[tuple[Session, str]]:

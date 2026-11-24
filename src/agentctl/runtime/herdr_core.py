@@ -118,9 +118,6 @@ class HerdrCoreAdapter(RuntimeAdapter):
         proc = self._run(["--version"])
         return proc.stdout.strip().removeprefix("hc ").strip()
 
-    def server_status(self) -> dict[str, Any]:
-        return self._run_json(["server", "status", "--json"])
-
     # ------------------------------------------------------------- lifecycle
 
     def create_terminal(

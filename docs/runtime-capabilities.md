@@ -129,7 +129,9 @@ for a later version:
 | opencode | not installed | — | [UNVERIFIED] |
 
 This is why agentctl stores `integration` per agent and maps "no status" to
-`unknown`, never to `idle`/`working`. Note `blocked` maps to agentctl `waiting`
+`unknown`, never to `idle`/`working`. Each catalog entry also records the
+release its capabilities were measured on; `agents list`, `agents inspect` and
+`setup` report a mismatch as unverified instead of pretending it still holds. Note `blocked` maps to agentctl `waiting`
 and is a human decision point (send refuses without `--force`).
 
 ## 5. Native session ids and resume

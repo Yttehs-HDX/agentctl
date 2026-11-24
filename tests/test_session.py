@@ -45,6 +45,7 @@ def test_create_records_identity_and_terminal(setup, workspace: Path) -> None:
     assert session.mode == "shared"
     assert result.terminal.address
     assert session.hc_terminal_id == result.terminal.address
+    assert result.ready is True
     stored = store.sessions.find_by_id(session.id)
     assert stored is not None
     assert stored.hc_terminal_id == session.hc_terminal_id
@@ -145,7 +146,8 @@ def test_create_rolls_back_when_runtime_fails(
 def test_delete_kills_and_retires(setup, workspace: Path) -> None:
     service, store, ws, _config = setup
     result = service.create(ws, CreateRequest(name="victim", agent=None, cwd=str(workspace)))
-    service.delete(ws, "victim")
+    deleted = service.delete(ws, "victim")
+    assert deleted.hc_terminal_id is None
     assert store.sessions.find_in_workspace(ws.id, "victim") is None
     history = store.sessions.list_for_workspace(ws.id, include_deleted=True)
     assert history[0].id == result.session.id
@@ -185,3 +187,54 @@ def test_hc_name_is_valid_for_the_runtime(setup, workspace: Path) -> None:
     assert name is not None
     assert re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,31}", name)
     assert len(name) <= 32
+
+
+def test_create_ready_is_false_without_a_reported_status(
+    setup, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentctl.runtime.base import TerminalInfo
+
+    service, _store, ws, _config = setup
+    unreported = TerminalInfo(
+        address="t99",
+        name=None,
+        state="live",
+        status=None,
+        app=None,
+        cwd=str(workspace),
+        exit_code=None,
+        reason=None,
+        reported=False,
+    )
+    monkeypatch.setattr(service.lifecycle, "find_terminal", lambda session: unreported)
+    result = service.create(ws, CreateRequest(name="quiet", agent="omp", cwd=str(workspace)))
+    assert result.ready is False
+
+
+def test_create_wait_uses_the_requested_timeout(
+    setup, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentctl.runtime.base import TerminalInfo
+
+    service, _store, ws, _config = setup
+    reported = TerminalInfo(
+        address="t99",
+        name=None,
+        state="live",
+        status="idle",
+        app=None,
+        cwd=str(workspace),
+        exit_code=None,
+        reason=None,
+        reported=True,
+    )
+    seen: list[float] = []
+    monkeypatch.setattr(
+        service.lifecycle, "wait_until_ready", lambda session, timeout: seen.append(timeout)
+    )
+    monkeypatch.setattr(service.lifecycle, "find_terminal", lambda session: reported)
+    result = service.create(
+        ws, CreateRequest(name="waited", agent="omp", cwd=str(workspace)), wait_timeout=2.5
+    )
+    assert seen == [2.5]
+    assert result.ready is True

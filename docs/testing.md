@@ -15,9 +15,9 @@ Herdr Core.
 | --- | --- |
 | `test_workspace.py` | canonical paths, stable ids across reopen, symlink identity, `..` escape |
 | `test_config.py` | TOML round-trip, schema validation, empty default agent |
-| `test_agents.py` | catalog resolution, disabled/missing/unknown agents, persisted mirror |
+| `test_agents.py` | catalog resolution, disabled/missing/unknown agents, version verification |
 | `test_runtime.py` | `hc` argv shape, verbatim sends, error-kind mapping, label filters |
-| `test_session.py` | create, duplicate names, cwd policy, agent precedence, rollback, delete |
+| `test_session.py` | create, readiness, duplicate names, cwd policy, agent precedence, rollback, delete |
 | `test_lifecycle.py` | status mapping, label-based terminal rediscovery, recovery rules |
 | `test_messaging.py` | delivery proof, `--force` opt-out, keys, interrupt |
 | `test_prune.py` | dry run, directory/row removal, live rows and outside paths kept |

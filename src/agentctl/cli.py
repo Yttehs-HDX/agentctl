@@ -16,7 +16,7 @@ from typing import Annotated, Any, Iterator, Optional
 import typer
 
 from agentctl import __version__
-from agentctl.agents.catalog import list_specs, resolve, sync_catalog
+from agentctl.agents.catalog import list_specs, resolve, version_verified
 from agentctl.agents.detector import installed, version as agent_version
 from agentctl.config import default_config, load_config, save_config
 from agentctl.config.loader import dumps
@@ -125,7 +125,6 @@ def _open(state: State) -> Iterator[tuple[Config, Store, HerdrCoreAdapter]]:
     config = state.require_config()
     with open_database() as conn:
         store = Store(conn)
-        sync_catalog(conn, config)
         yield config, store, state.runtime()
 
 
@@ -169,12 +168,14 @@ def setup(
     for spec in list_specs(config):
         definition = _definition(spec.id)
         is_installed = installed(definition) if definition else False
+        row_version = agent_version(definition) if is_installed else None
         rows.append(
             {
                 "id": spec.id,
                 "command": spec.command,
                 "installed": is_installed,
-                "version": agent_version(definition) if is_installed else None,
+                "version": row_version,
+                "version_verified": version_verified(definition, row_version) if definition else None,
                 "enabled": spec.enabled,
                 "integration": spec.integration,
             }
@@ -195,9 +196,6 @@ def setup(
             raise UsageError(f"cannot use {chosen!r} as the default agent: {exc.message}", exc.hint) from exc
     config.defaults.agent = chosen
     written = save_config(config)
-
-    with open_database() as conn:
-        sync_catalog(conn, config)
 
     payload = {
         "config": str(written),
@@ -247,13 +245,15 @@ def _print_setup(payload: dict[str, Any]) -> None:
     else:
         typer.echo("herdr core: MISSING - install Herdr Core and rerun setup")
     typer.echo("")
-    typer.echo(f"{'agent':<10}{'status':<14}{'status words':<14}command")
+    typer.echo(f"{'agent':<10}{'status':<24}{'status words':<14}command")
     for row in payload["agents"]:
         status = "installed" if row["installed"] else "missing"
+        if row["version_verified"] is False:
+            status += " (unverified)"
         if not row["enabled"]:
             status += " (off)"
         word = "reports" if row["integration"] else "none"
-        typer.echo(f"{row['id']:<10}{status:<14}{word:<14}{' '.join(row['command'])}")
+        typer.echo(f"{row['id']:<10}{status:<24}{word:<14}{' '.join(row['command'])}")
     typer.echo("")
     typer.echo(f"default agent: {payload['default_agent'] or '(none)'}")
 
@@ -368,19 +368,26 @@ def create(
     base_ref: Annotated[
         Optional[str], typer.Option("--base-ref", help="Git ref to branch from for --mode worktree.")
     ] = None,
+    wait: Annotated[
+        Optional[float],
+        typer.Option("--wait", help="Seconds to wait for the agent's first status report."),
+    ] = None,
 ) -> None:
     """Create a worker session."""
     state = _state(ctx)
     with _open(state) as (config, store, runtime):
         workspace = _workspace(state, store)
         result = SessionService(store, runtime, config).create(
-            workspace, CreateRequest(name=name, agent=agent, cwd=cwd, mode=mode, base_ref=base_ref)
+            workspace,
+            CreateRequest(name=name, agent=agent, cwd=cwd, mode=mode, base_ref=base_ref),
+            wait_timeout=wait or 0.0,
         )
         session = result.session
         payload = {
             "session": session.to_dict(),
             "terminal": result.terminal.address,
             "native_session_id": result.native_session_id,
+            "ready": result.ready,
         }
         state.emit(
             payload,
@@ -390,7 +397,8 @@ def create(
                 f"  agent:    {session.agent}\n"
                 f"  cwd:      {session.cwd}\n"
                 f"  mode:     {session.mode}\n"
-                f"  terminal: {result.terminal.address}"
+                f"  terminal: {result.terminal.address}\n"
+                f"  ready:    {'yes' if result.ready else 'no'}"
             ),
         )
 
@@ -656,12 +664,16 @@ def agents_list(ctx: typer.Context) -> None:
     rows = []
     for spec in list_specs(config):
         definition = _definition(spec.id)
+        is_installed = installed(definition) if definition else False
+        row_version = agent_version(definition) if is_installed else None
         rows.append(
             {
                 "id": spec.id,
                 "command": spec.command,
                 "enabled": spec.enabled,
-                "installed": installed(definition) if definition else False,
+                "installed": is_installed,
+                "version": row_version,
+                "version_verified": version_verified(definition, row_version) if definition else None,
                 "integration": spec.integration,
                 "supports_native_session": spec.supports_native_session,
                 "supports_resume": spec.supports_resume,
@@ -679,10 +691,12 @@ def _config_or_default() -> Config:
 
 
 def _print_agents(rows) -> None:
-    typer.echo(f"{'id':<12}{'enabled':<9}{'installed':<11}{'words':<8}{'resume':<8}command")
+    typer.echo(f"{'id':<12}{'enabled':<9}{'installed':<11}{'verified':<10}{'words':<8}{'resume':<8}command")
     for row in rows:
+        verified = "-" if row["version_verified"] is None else ("yes" if row["version_verified"] else "no")
         typer.echo(
             f"{row['id']:<12}{str(row['enabled']).lower():<9}{str(row['installed']).lower():<11}"
+            f"{verified:<10}"
             f"{'reports' if row['integration'] else 'none':<8}"
             f"{str(row['supports_resume']).lower():<8}{' '.join(row['command'])}"
         )
@@ -698,13 +712,15 @@ def agents_inspect(
     config = _config_or_default()
     definition = _definition(agent_id)
     entry = config.agents.get(agent_id)
+    installed_version = agent_version(definition) if definition else None
     payload = {
         "id": agent_id,
         "configured": entry is not None,
         "enabled": entry.enabled if entry else None,
         "command": entry.command if entry else (definition.command if definition else None),
         "installed": installed(definition) if definition else False,
-        "version": agent_version(definition) if definition else None,
+        "version": installed_version,
+        "version_verified": version_verified(definition, installed_version) if definition else None,
         "integration": bool(definition and definition.integration),
         "supports_native_session": bool(definition and definition.session_id != "none"),
         "session_id_strategy": definition.session_id if definition else None,
@@ -723,6 +739,7 @@ def _print_agent_detail(payload: dict[str, Any]) -> None:
         "enabled",
         "installed",
         "version",
+        "version_verified",
         "integration",
         "supports_native_session",
         "session_id_strategy",

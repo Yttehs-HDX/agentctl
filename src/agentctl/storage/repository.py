@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterable
-
 from agentctl.storage.models import Session, Workspace
 
 
@@ -114,12 +112,6 @@ class SessionRepository:
                 "SELECT * FROM sessions WHERE workspace_id = ? AND deleted_at IS NULL ORDER BY created_at",
                 (workspace_id,),
             ).fetchall()
-        return [_row_to_session(row) for row in rows]
-
-    def list_all_live(self) -> Iterable[Session]:
-        rows = self.conn.execute(
-            "SELECT * FROM sessions WHERE deleted_at IS NULL ORDER BY created_at"
-        ).fetchall()
         return [_row_to_session(row) for row in rows]
 
     def list_deleted(self, workspace_id: str) -> list[Session]:

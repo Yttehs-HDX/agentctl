@@ -216,7 +216,13 @@ def test_recover_resumes_from_native_id(live, workspace: Path, monkeypatch: pyte
         last_error=None,
         updated_at=created.session.updated_at,
     )
-    monkeypatch.setattr(service.lifecycle.runtime, "find_terminal", lambda t: None)
+    old_address = created.session.hc_terminal_id
+    original_find = service.runtime.find_terminal
+    monkeypatch.setattr(
+        service.lifecycle.runtime,
+        "find_terminal",
+        lambda t: None if t == old_address else original_find(t),
+    )
     monkeypatch.setattr(service.lifecycle.runtime, "list_terminals", lambda **kw: [])
     calls: list[list[str]] = []
     original = service.runtime.create_terminal
@@ -232,6 +238,7 @@ def test_recover_resumes_from_native_id(live, workspace: Path, monkeypatch: pyte
     assert "--resume" in calls[0]
     assert calls[0][calls[0].index("--resume") + 1] == native
     assert target.hc_terminal_id
+    assert target.status == "idle"
 
 
 def test_non_resumable_agent_is_marked_unreachable(live, workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:

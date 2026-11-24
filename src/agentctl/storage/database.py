@@ -53,14 +53,6 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE UNIQUE INDEX IF NOT EXISTS sessions_one_live_name
     ON sessions(workspace_id, name) WHERE deleted_at IS NULL;
-
-CREATE TABLE IF NOT EXISTS agent_catalog (
-    id TEXT PRIMARY KEY,
-    command_json TEXT NOT NULL,
-    enabled INTEGER NOT NULL,
-    capabilities_json TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
 """
 
 
@@ -105,6 +97,9 @@ _ADDED_COLUMNS = {
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
+    # The agent catalog is computed at call time; the old persisted mirror had
+    # no reader. Drop it so an upgraded registry.db carries no dead table.
+    conn.execute("DROP TABLE IF EXISTS agent_catalog")
     for table, columns in _ADDED_COLUMNS.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
         for name, sql_type in columns.items():

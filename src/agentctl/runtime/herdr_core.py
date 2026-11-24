@@ -150,6 +150,16 @@ class HerdrCoreAdapter(RuntimeAdapter):
         args.append(text)
         return self._run_json(args)
 
+    def send_keys(self, terminal: str, keys: list[str]) -> dict[str, Any]:
+        return self._run_json(["keys", "--json", terminal, *keys])
+
+    def interrupt(self, terminal: str, *, timeout: float | None = None) -> dict[str, Any]:
+        args = ["interrupt", "--json"]
+        if timeout is not None:
+            args.extend(["--timeout", f"{timeout:g}"])
+        args.append(terminal)
+        return self._run_json(args)
+
     def read_output(self, terminal: str, *, lines: int = 0) -> ReadOutput:
         body = self._run_json(["read", "--json", "--lines", str(lines), terminal])
         return ReadOutput(

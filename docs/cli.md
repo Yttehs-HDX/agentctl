@@ -7,7 +7,8 @@ agentctl [--workspace PATH] [--json] <command> [options]
 ```
 
 - `--workspace PATH` — Leader workspace root. Mandatory for `init`, `info`,
-  `list`, `create`, `delete`, `send`, `read`, `status`, `wait`, `recover`.
+  `list`, `create`, `delete`, `prune`, `send`, `keys`, `interrupt`, `read`,
+  `status`, `wait`, `recover`.
   It is never inferred from the current directory. The path is resolved with
   `realpath`, so a symlink and its target share one workspace.
 - `--json` — machine-readable output. Accepted before or after the command.
@@ -107,6 +108,26 @@ agentctl --workspace PATH delete NAME [--keep-worktree]
 Kills the agent, removes the terminal, applies the worktree policy, and soft
 deletes the record. Never deletes worker files: a dirty worktree is kept.
 
+## prune
+
+```text
+agentctl --workspace PATH prune [--dry-run]
+```
+
+Reclaims state owned by the registry for this workspace's soft-deleted
+sessions: it removes each `native_session_dir` that is a direct child of
+`session_state_dir()` (sizes are reported before removal), then hard-deletes
+the row. A directory anywhere else is reported and kept, as is a row
+whose directory could not be removed. Worktrees and git branches are never
+touched; agent-global native stores are out of scope. `--dry-run` reports what
+would happen without deleting anything. Human output:
+
+```text
+would prune 2 sessions, 2 directories, 4.0 KiB
+pruned 2 sessions, removed 2 directories, freed 4.0 KiB
+kept: session 'x': refusing to remove /elsewhere (outside ...)
+```
+
 ## send
 
 ```text
@@ -115,8 +136,38 @@ agentctl --workspace PATH send NAME -          # read stdin
 ```
 
 Text is passed as one argv element: quotes, `$VAR`, leading `-` and newlines are
-preserved. `--force` types into a blocked agent (it answers its dialog). Sending
-to a finished session is an error, not a silent no-op.
+preserved. Delivery must be confirmed: a session whose agent reports status
+(codex/opencode do not) waits up to 15 s for a status report and then fails
+with exit code 8 (`delivery_unconfirmed`) rather than typing blindly. An agent
+that does not report status at all fails immediately. `--force` skips the
+readiness proof and types anyway; the report then has `confirmed: false`. On a
+dialog, `--force` submits the currently selected option, which can exit the
+agent. Use `keys` to answer a dialog deliberately. Sending to a finished
+session is an error, not a silent no-op.
+
+## keys
+
+```text
+agentctl --workspace PATH keys NAME KEY [KEY...] [--json]
+```
+
+Sends named keys to a live terminal, which is how a Leader answers a trust or
+permission dialog instead of waiting at `unknown`. Key names: `enter`, `esc`,
+`tab`, `up`, `down`, `left`, `right`, `ctrl+c`, `alt+x`, `f5`, `a`. A name
+starting with `-` is rejected at the service boundary. Output is
+`{"session", "terminal", "status", "turn"}`; human output is
+`sent keys to NAME (turn N)`. No readiness wait is performed.
+
+## interrupt
+
+```text
+agentctl --workspace PATH interrupt NAME [--timeout S]
+```
+
+Sends the runtime's interrupt (`ctrl+c`) and reports
+`{"session", "terminal", "key", "outcome"}`. Human output is
+`NAME: ctrl+c -> outcome` with `-` for a missing value. No readiness wait is
+performed; a finished terminal is an error.
 
 ## read
 

@@ -324,3 +324,9 @@ class _StubRuntime:
 
     def list_terminals(self, *, labels=None, include_finished=False):
         return list(self._listed)
+
+    def get_terminal(self, terminal):
+        for info in self._listed:
+            if info.address == terminal:
+                return info
+        return self._listed[0]

@@ -9,9 +9,11 @@ Contract:
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from agentctl.agents.catalog import definition_for, resolve
@@ -36,6 +38,15 @@ HC_NAME_MAX = 32
 _NAME_OK = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 
 
+def _directory_size(root: Path) -> int:
+    """Bytes of regular-file data, without following symlinks out of the tree."""
+    total = 0
+    for dirpath, _dirnames, filenames in os.walk(root, followlinks=False):
+        for name in filenames:
+            total += os.lstat(os.path.join(dirpath, name)).st_size
+    return total
+
+
 @dataclass(slots=True)
 class CreateRequest:
     name: str
@@ -50,6 +61,24 @@ class CreateResult:
     session: Session
     terminal: TerminalInfo
     native_session_id: str | None
+
+
+@dataclass(slots=True)
+class PruneResult:
+    sessions: int = 0
+    directories: int = 0
+    bytes_freed: int = 0
+    errors: list[str] = field(default_factory=list)
+    dry_run: bool = False
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "sessions": self.sessions,
+            "directories": self.directories,
+            "bytes_freed": self.bytes_freed,
+            "errors": list(self.errors),
+            "dry_run": self.dry_run,
+        }
 
 
 class SessionService:
@@ -309,6 +338,55 @@ class SessionService:
         session.deleted_at = now()
         self.store.workspaces.touch(workspace.id, now())
         return session
+
+    # ------------------------------------------------------------------ prune
+
+    def prune(self, workspace: Workspace, *, dry_run: bool = False) -> PruneResult:
+        """Reclaim agentctl-owned state for this workspace's soft-deleted rows.
+
+        Only directories inside `session_state_dir()` are removed. Worktrees,
+        git branches and agent-global stores are project/agent data and stay.
+        """
+        result = PruneResult(dry_run=dry_run)
+        state_dir = Path(session_state_dir()).resolve()
+        for session in self.store.sessions.list_deleted(workspace.id):
+            resolved: Path | None = None
+            if session.native_session_dir:
+                resolved = Path(session.native_session_dir).resolve()
+                # Session state dirs are direct children (`<state>/<session id>`).
+                # A nested target can only come from a broken row, and this
+                # command deletes data, so refuse anything else.
+                if resolved.parent != state_dir:
+                    result.errors.append(
+                        f"session {session.name!r}: refusing to remove "
+                        f"{resolved} (not a direct session directory under {state_dir})"
+                    )
+                    continue
+            if resolved is None or not resolved.exists():
+                if not dry_run:
+                    self.store.sessions.hard_delete(session.id)
+                result.sessions += 1
+                continue
+            try:
+                size = _directory_size(resolved)
+            except OSError as exc:
+                result.errors.append(f"session {session.name!r}: cannot size {resolved}: {exc}")
+                continue
+            if dry_run:
+                result.directories += 1
+                result.bytes_freed += size
+                result.sessions += 1
+                continue
+            try:
+                shutil.rmtree(resolved)
+            except OSError as exc:
+                result.errors.append(f"session {session.name!r}: cannot remove {resolved}: {exc}")
+                continue
+            self.store.sessions.hard_delete(session.id)
+            result.sessions += 1
+            result.directories += 1
+            result.bytes_freed += size
+        return result
 
     # ----------------------------------------------------------------- recover
 

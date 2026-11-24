@@ -72,6 +72,19 @@ violating the product requirement that workers outlive the Leader.
   agent may be dropped, so agentctl waits for the first status report
   (`reported: true` or first status word) before sending.
 
+Keys and interrupts (measured on hc 0.1.22 against a scratch core):
+
+```text
+hc keys --json <terminal> <key>...        -> {"status": "idle"|null, "turn": 0}
+hc interrupt --json [--timeout S] <term>  -> {"key": "ctrl+c", "outcome": "exited"}
+```
+
+Key names: `enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl+c`,
+`alt+x`, `f5`, `a`. A key name never starts with `-`; agentctl rejects those at
+the service boundary so `hc` never parses one as an option. Both calls resolve
+the terminal directly (no readiness wait); a finished terminal raises
+`RuntimeFinished` through the same error mapping as `send`.
+
 `hc read --json` = `{text, complete, how, why}`.
 
 - `how` is `screen`, `history`, or `stitched`.

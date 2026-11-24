@@ -414,6 +414,42 @@ def delete(
         )
 
 
+@app.command()
+def prune(
+    ctx: typer.Context,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Report what would be removed without deleting.")
+    ] = False,
+) -> None:
+    """Remove agentctl-owned state of soft-deleted sessions."""
+    state = _state(ctx)
+    with _open(state) as (config, store, runtime):
+        workspace = _workspace(state, store)
+        result = SessionService(store, runtime, config).prune(workspace, dry_run=dry_run)
+        state.emit(result.to_dict(), lambda: _print_prune(result))
+
+
+def _format_bytes(count: int) -> str:
+    if count < 1024:
+        return f"{count} B"
+    return f"{count / 1024:.1f} KiB"
+
+
+def _print_prune(result) -> None:
+    if result.dry_run:
+        typer.echo(
+            f"would prune {result.sessions} sessions, "
+            f"{result.directories} directories, {_format_bytes(result.bytes_freed)}"
+        )
+    else:
+        typer.echo(
+            f"pruned {result.sessions} sessions, "
+            f"removed {result.directories} directories, freed {_format_bytes(result.bytes_freed)}"
+        )
+    for error in result.errors:
+        typer.echo(f"kept: {error}")
+
+
 # --------------------------------------------------------------------- messaging
 
 
@@ -423,7 +459,11 @@ def send(
     session: Annotated[str, typer.Argument(help="Session name or id.")],
     message: Annotated[str, typer.Argument(help="Text to send, or - to read stdin.")],
     force: Annotated[
-        bool, typer.Option("--force", help="Type even if the agent is blocked (answers its dialog).")
+        bool,
+        typer.Option(
+            "--force",
+            help="Type even if the agent has not reported status (delivery is then unconfirmed).",
+        ),
     ] = False,
 ) -> None:
     """Send a message to a session."""
@@ -439,8 +479,50 @@ def send(
         service.lifecycle.refresh(target)
         service.sync_native_id(target)
         payload = report.to_dict()
-        payload["status"] = payload["status"]
-        state.emit(payload, lambda: typer.echo(f"sent to {report.session} at turn {report.turn}"))
+        state.emit(
+            payload,
+            lambda: typer.echo(
+                f"sent to {report.session} at turn {report.turn}"
+                + ("" if report.confirmed else " (delivery unconfirmed)")
+            ),
+        )
+
+
+@app.command()
+def keys(
+    ctx: typer.Context,
+    session: Annotated[str, typer.Argument(help="Session name or id.")],
+    keys: Annotated[list[str], typer.Argument(help="Key names: enter, esc, tab, down, ctrl+c, f5, a, ...")],
+) -> None:
+    """Send named keys to a session (answer a trust or permission dialog)."""
+    state = _state(ctx)
+    with _open(state) as (config, store, runtime):
+        workspace = _workspace(state, store)
+        service = SessionService(store, runtime, config)
+        target = service.get(workspace, session)
+        report = MessagingService(runtime, service.lifecycle).keys(target, keys)
+        state.emit(report.to_dict(), lambda: typer.echo(f"sent keys to {report.session} (turn {report.turn})"))
+
+
+@app.command()
+def interrupt(
+    ctx: typer.Context,
+    session: Annotated[str, typer.Argument(help="Session name or id.")],
+    timeout: Annotated[
+        Optional[float], typer.Option("--timeout", help="Seconds to wait for the interrupt to land.")
+    ] = None,
+) -> None:
+    """Interrupt the agent in a session (ctrl+c)."""
+    state = _state(ctx)
+    with _open(state) as (config, store, runtime):
+        workspace = _workspace(state, store)
+        service = SessionService(store, runtime, config)
+        target = service.get(workspace, session)
+        report = MessagingService(runtime, service.lifecycle).interrupt(target, timeout=timeout)
+        state.emit(
+            report.to_dict(),
+            lambda: typer.echo(f"{report.session}: {report.key or '-'} -> {report.outcome or '-'}"),
+        )
 
 
 @app.command()

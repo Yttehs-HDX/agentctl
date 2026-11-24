@@ -96,7 +96,10 @@ if cmd == "ls":
     out = []
     for body in state["terminals"].values():
         if all(body["labels"].get(k) == v for k, v in label_filters.items()):
-            out.append({{**body, "status": (body["status"] or {{}}).get("state")}})
+            # hc 0.1.22 `ls` omits `reported`; only `get` has the status record.
+            item = {{k: v for k, v in body.items() if k != "reported"}}
+            item["status"] = (body["status"] or {{}}).get("state")
+            out.append(item)
     emit({{"terminals": out, "hidden_finished": 0, "machines": []}})
 
 if cmd in ("get", "kill", "rm"):
@@ -124,6 +127,22 @@ if cmd == "send":
     state.setdefault("sent", []).append({{"terminal": term, "text": text}})
     state_path.write_text(json.dumps(state))
     emit({{"started": True, "status": "idle", "turn": 1}})
+
+if cmd == "keys":
+    term = args[2]
+    body = find(term)
+    if body is None:
+        print(json.dumps({{"error": {{"kind": "not_found", "message": f"no terminal {{term}}", "hint": "see hc ls"}}}}), file=sys.stderr)
+        raise SystemExit(3)
+    emit({{"status": "idle", "turn": 1}})
+
+if cmd == "interrupt":
+    term = args[-1]
+    body = find(term)
+    if body is None:
+        print(json.dumps({{"error": {{"kind": "not_found", "message": f"no terminal {{term}}", "hint": "see hc ls"}}}}), file=sys.stderr)
+        raise SystemExit(3)
+    emit({{"key": "ctrl+c", "outcome": "interrupted"}})
 
 if cmd == "read":
     term = args[-1]

@@ -146,10 +146,20 @@ action, and even then the row is soft-deleted.
 
 ## Messaging
 
-- `send` validates the session is this workspace's, resolves the terminal
-  through the registry/labels, waits until the agent has reported once (a send
-  into a booting agent can be dropped), then passes the text as a single argv
-  element so quotes, `$VAR`, leading `-` and embedded newlines arrive verbatim.
+- `send` requires proof of delivery: it resolves the terminal, rejects agents
+  whose catalog definition has `integration = false` immediately, waits up to
+  15 s for a status report, and fails with `DeliveryUnconfirmed` (exit 8) if the
+  agent never reports. `--force` is the explicit opt-out and reports
+  `confirmed: false`. Text is passed as a single argv element so quotes, `$VAR`,
+  leading `-` and embedded newlines arrive verbatim.
+- `keys` and `interrupt` expose Herdr Core's `hc keys` and `hc interrupt` for
+  trust/permission dialogs and cancellation. Both resolve the live terminal
+  without a readiness wait; key names starting with `-` are rejected at the
+  service boundary.
+- `prune` reclaims state agentctl owns for this workspace's soft-deleted rows:
+  it removes `native_session_dir` trees only when they are direct children of
+  `session_state_dir()`, then hard-deletes the row. Worktrees and branches are
+  never touched; agent-global native session stores are out of scope.
 - `read` reports `complete`/`why` from HC so partial history (agent busy,
   full-screen app) is labelled rather than silently truncated.
 - `wait` is HC's own wait: it returns on a status change, on exit, or on a

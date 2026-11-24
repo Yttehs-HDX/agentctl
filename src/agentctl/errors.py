@@ -139,5 +139,10 @@ class RuntimeBlocked(RuntimeFailure):
     exit_code = EXIT_BLOCKED
 
 
+class DeliveryUnconfirmed(AgentctlError):
+    code = "delivery_unconfirmed"
+    exit_code = EXIT_BLOCKED  # 8, a human decision is needed
+
+
 class RuntimeFinished(RuntimeFailure):
     code = "runtime_finished"

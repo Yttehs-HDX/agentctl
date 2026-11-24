@@ -56,7 +56,10 @@ the same sessions and the same terminals.
 | `list [--all]` | Sessions of this workspace |
 | `create --name N --cwd DIR [--agent ID] [--mode shared\|worktree] [--base-ref REF]` | New worker session |
 | `delete NAME [--keep-worktree]` | Kill the agent, clean the terminal, retire the record |
+| `prune [--dry-run]` | Reclaim agentctl-owned state of soft-deleted sessions |
 | `send NAME TEXT` / `send NAME -` | Send a message (stdin keeps bytes intact) |
+| `keys NAME KEY [KEY...]` | Send named keys (answer trust/permission dialogs) |
+| `interrupt NAME [--timeout S]` | Interrupt the agent (ctrl+c) |
 | `read NAME [--lines N] [--follow]` | Screen + history |
 | `status [NAME]` | Session or workspace status |
 | `wait NAME [--timeout S]` | Wait until the agent stops working |

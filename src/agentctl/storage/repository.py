@@ -122,6 +122,14 @@ class SessionRepository:
         ).fetchall()
         return [_row_to_session(row) for row in rows]
 
+    def list_deleted(self, workspace_id: str) -> list[Session]:
+        rows = self.conn.execute(
+            "SELECT * FROM sessions WHERE workspace_id = ? AND deleted_at IS NOT NULL "
+            "ORDER BY deleted_at",
+            (workspace_id,),
+        ).fetchall()
+        return [_row_to_session(row) for row in rows]
+
     def insert(self, session: Session) -> None:
         self.conn.execute(
             """

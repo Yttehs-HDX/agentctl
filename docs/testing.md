@@ -19,6 +19,8 @@ Herdr Core.
 | `test_runtime.py` | `hc` argv shape, verbatim sends, error-kind mapping, label filters |
 | `test_session.py` | create, duplicate names, cwd policy, agent precedence, rollback, delete |
 | `test_lifecycle.py` | status mapping, label-based terminal rediscovery, recovery rules |
+| `test_messaging.py` | delivery proof, `--force` opt-out, keys, interrupt |
+| `test_prune.py` | dry run, directory/row removal, live rows and outside paths kept |
 | `test_recovery.py` | leader restart: same identity, same sessions, `recover`, isolation |
 | `test_worktree.py` | worktree creation, branch naming, cleanup policy, non-git rejection |
 

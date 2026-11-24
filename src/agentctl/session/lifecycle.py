@@ -93,7 +93,15 @@ class LifecycleManager:
             )
             if t.is_local
         ]
-        return terminals[0] if terminals else None
+        if not terminals:
+            return None
+        # `hc ls` reports `reported: null`; only `hc get` carries the status
+        # record. Delivery proof depends on `reported`, so enrich the label
+        # fallback instead of trusting the list shape.
+        try:
+            return self.runtime.get_terminal(terminals[0].address)
+        except RuntimeFailure:
+            return terminals[0]
 
     def refresh(self, session: Session, *, persist: bool = True) -> Session:
         """Re-derive one session's status from the runtime and persist it."""

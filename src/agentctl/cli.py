@@ -6,16 +6,17 @@ Database access, runtime calls and path validation live below it.
 
 from __future__ import annotations
 
+import io
 import json as jsonlib
 import os
 import sys
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass
 from typing import Annotated, Any, Iterator, Optional
 
 import typer
 
-from agentctl import __version__
+from agentctl import JSON_SCHEMA, __version__
 from agentctl.agents.catalog import list_specs, resolve, version_verified
 from agentctl.agents.detector import installed, version as agent_version
 from agentctl.config import default_config, load_config, save_config
@@ -58,7 +59,8 @@ class State:
 
     def emit(self, payload: Any, human) -> None:
         if self.json:
-            typer.echo(jsonlib.dumps(payload, indent=2, default=str))
+            body = payload if isinstance(payload, dict) else {"result": payload}
+            typer.echo(jsonlib.dumps({"schema": JSON_SCHEMA, **body}, indent=2, default=str))
         else:
             human()
 
@@ -97,6 +99,7 @@ def main_callback(
     workspace: Annotated[Optional[str], typer.Option("--workspace", "-w", help=WORKSPACE_HELP)] = None,
     json_output: Annotated[bool, typer.Option("--json", help="Machine-readable output.")] = False,
 ) -> None:
+    workspace = workspace or os.environ.get("AGENTCTL_WORKSPACE") or None
     state = State(workspace_arg=workspace, json=_json_requested(json_output))
     ctx.obj = state
     if ctx.invoked_subcommand in {"setup", "agents", "config", "version"}:
@@ -310,6 +313,9 @@ def list_sessions(
     all_sessions: Annotated[
         bool, typer.Option("--all", help="Also show sessions deleted earlier.")
     ] = False,
+    no_refresh: Annotated[
+        bool, typer.Option("--no-refresh", help="Skip the runtime status refresh.")
+    ] = False,
 ) -> None:
     """List the sessions of this workspace."""
     state = _state(ctx)
@@ -320,7 +326,7 @@ def list_sessions(
             # Deleted rows are history: never re-derive them from the runtime.
             sessions = store.sessions.list_for_workspace(workspace.id, include_deleted=True)
         else:
-            sessions = service.list(workspace)
+            sessions = service.list(workspace, refresh=not no_refresh)
         payload = {"workspace_id": workspace.id, "sessions": [s.to_dict() for s in sessions]}
         state.emit(payload, lambda: _print_sessions(sessions))
 
@@ -435,6 +441,8 @@ def prune(
         workspace = _workspace(state, store)
         result = SessionService(store, runtime, config).prune(workspace, dry_run=dry_run)
         state.emit(result.to_dict(), lambda: _print_prune(result))
+        if result.errors:
+            raise typer.Exit(code=1)
 
 
 def _format_bytes(count: int) -> str:
@@ -476,7 +484,15 @@ def send(
 ) -> None:
     """Send a message to a session."""
     state = _state(ctx)
-    text = sys.stdin.read() if message == "-" else message
+    if message == "-":
+        if sys.stdin.isatty():
+            raise UsageError(
+                "send - expects piped input",
+                "pipe the text, e.g. printf '%s' \"$text\" | agentctl ... send NAME -",
+            )
+        text = sys.stdin.read()
+    else:
+        text = message
     if not text.strip():
         raise UsageError("refusing to send an empty message")
     with _open(state) as (config, store, runtime):
@@ -542,6 +558,11 @@ def read(
 ) -> None:
     """Print a session's screen and recent history."""
     state = _state(ctx)
+    if follow and state.json:
+        raise UsageError(
+            "--follow cannot be combined with --json",
+            "call read without --follow for a single JSON snapshot",
+        )
     with _open(state) as (config, store, runtime):
         workspace = _workspace(state, store)
         service = SessionService(store, runtime, config)
@@ -554,7 +575,13 @@ def read(
         if state.json:
             typer.echo(
                 jsonlib.dumps(
-                    {"text": output.text, "complete": output.complete, "how": output.how, "why": output.why},
+                    {
+                        "schema": JSON_SCHEMA,
+                        "text": output.text,
+                        "complete": output.complete,
+                        "how": output.how,
+                        "why": output.why,
+                    },
                     indent=2,
                 )
             )
@@ -568,6 +595,9 @@ def read(
 def status(
     ctx: typer.Context,
     session: Annotated[Optional[str], typer.Argument(help="Session name or id; omit for all.")] = None,
+    no_refresh: Annotated[
+        bool, typer.Option("--no-refresh", help="Skip the runtime status refresh.")
+    ] = False,
 ) -> None:
     """Show one session's or the whole workspace's status."""
     state = _state(ctx)
@@ -576,7 +606,8 @@ def status(
         service = SessionService(store, runtime, config)
         if session:
             target = service.get(workspace, session)
-            service.lifecycle.refresh(target)
+            if not no_refresh:
+                service.lifecycle.refresh(target)
             state.emit(
                 {"session": target.to_dict()},
                 lambda: typer.echo(
@@ -585,7 +616,7 @@ def status(
                 ),
             )
         else:
-            sessions = service.list(workspace)
+            sessions = service.list(workspace, refresh=not no_refresh)
             state.emit(
                 {"workspace_id": workspace.id, "sessions": [s.to_dict() for s in sessions]},
                 lambda: _print_sessions(sessions),
@@ -824,7 +855,8 @@ def config_list(ctx: typer.Context) -> None:
     state = _state(ctx)
     config = _must_load_config()
     if state.json:
-        typer.echo(jsonlib.dumps(config.model_dump(mode="json"), indent=2))
+        body = {"schema": JSON_SCHEMA, **config.model_dump(mode="json")}
+        typer.echo(jsonlib.dumps(body, indent=2))
     else:
         typer.echo(dumps(config), nl=False)
 
@@ -848,19 +880,71 @@ def version() -> None:
 # -------------------------------------------------------------------------- main
 
 
+def _prepare_argv(argv: list[str]) -> tuple[list[str], bool]:
+    """Hoist `--json` before the command, stopping at the `--` terminator.
+
+    Typer parses callback options before the command name, so a trailing
+    `--json` would become a positional argument. Everything after `--` is
+    caller data and is never touched, which makes a literal `--json` message
+    sendable as `send NAME -- --json`.
+    """
+    out: list[str] = []
+    json_mode = False
+    for index, arg in enumerate(argv):
+        if arg == "--":
+            out.extend(argv[index:])
+            break
+        if arg == "--json":
+            json_mode = True
+            continue
+        out.append(arg)
+    if json_mode:
+        out.insert(0, "--json")
+    return out, json_mode
+
+
 def main() -> None:
-    argv = sys.argv[1:]
-    if "--json" in argv:
-        # Accept `--json` after the subcommand too: Typer only parses callback
-        # options before the command name, so hoist it and remember the choice
-        # for `--json`-agnostic helpers.
-        cleaned = [arg for arg in argv if arg != "--json"]
-        sys.argv = [sys.argv[0], "--json", *cleaned]
-        os.environ["AGENTCTL_JSON"] = "1"
+    argv, json_mode = _prepare_argv(sys.argv[1:])
+    sys.argv = [sys.argv[0], *argv]
     try:
-        app()
+        if json_mode:
+            # Click prints its own usage errors and exits; capture that text so
+            # the machine-readable mode emits one JSON envelope instead.
+            captured = io.StringIO()
+            try:
+                with redirect_stderr(captured):
+                    app()
+            except SystemExit as exc:
+                if exc.code == 2:
+                    _print_usage_error(captured.getvalue())
+                raise
+        else:
+            app()
     except AgentctlError as exc:
         _print_error(exc)
+
+
+def _print_usage_error(text: str) -> None:
+    """Turn Click's usage error into the same JSON envelope as our errors."""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    message = next((line.strip("│ ") for line in lines if line.startswith("│")), None)
+    if message is None:
+        message = next(
+            (line.removeprefix("Error:").strip() for line in reversed(lines) if line.startswith("Error:")),
+            None,
+        )
+    if message is None:
+        message = lines[0] if lines else "invalid command line"
+    body = {
+        "schema": JSON_SCHEMA,
+        "error": {
+            "type": "UsageError",
+            "code": "usage",
+            "message": message,
+            "hint": "run `agentctl <command> --help`",
+        },
+    }
+    typer.echo(jsonlib.dumps(body, indent=2), err=True)
 
 
 def _print_error(exc: AgentctlError) -> None:

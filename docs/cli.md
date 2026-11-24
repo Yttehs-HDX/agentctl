@@ -6,12 +6,16 @@ Global options come before the command:
 agentctl [--workspace PATH] [--json] <command> [options]
 ```
 
-- `--workspace PATH` — Leader workspace root. Mandatory for `init`, `info`,
+- `--workspace PATH` — Leader workspace root. Required for `init`, `info`,
   `list`, `create`, `delete`, `prune`, `send`, `keys`, `interrupt`, `read`,
-  `status`, `wait`, `recover`.
-  It is never inferred from the current directory. The path is resolved with
-  `realpath`, so a symlink and its target share one workspace.
+  `status`, `wait`, `recover`, unless `AGENTCTL_WORKSPACE` is set. The flag
+  wins over the environment variable. The path is resolved with `realpath`, so
+  a symlink and its target share one workspace. It is never inferred from the
+  current directory.
 - `--json` — machine-readable output. Accepted before or after the command.
+  Everything after a `--` terminator is caller data, so a literal `--json`
+  message is sendable as `send NAME -- --json`. JSON objects carry
+  `"schema": 1`; bumping that number means a field changed shape.
 
 Exit codes: `0` ok, `1` generic/runtime error, `2` usage, `3` not found,
 `4` setup or init missing, `5` conflict (duplicate name, …), `6` invalid
@@ -27,9 +31,13 @@ hint:  <what to do>
 with `--json` the same information is a JSON object:
 
 ```json
-{"error": {"type": "SessionNotFound", "code": "session_not_found",
+{"schema": 1,
+ "error": {"type": "SessionNotFound", "code": "session_not_found",
            "message": "...", "hint": "...", "runtime_kind": "not_found"}}
 ```
+
+Argument-parsing errors are JSON too when `--json` is active: type
+`UsageError`, code `usage`, exit code 2.
 
 ## setup
 
@@ -78,7 +86,8 @@ agentctl --workspace PATH list [--all]
 ```
 
 Live sessions of this workspace, with a runtime refresh. `--all` adds soft
-deleted history (never refreshed from the runtime).
+deleted history (never refreshed from the runtime). `--no-refresh` skips the
+per-session `hc get`, which is the difference between one call and N calls.
 
 ## create
 
@@ -109,7 +118,8 @@ agentctl --workspace PATH delete NAME [--keep-worktree]
 ```
 
 Kills the agent, removes the terminal, applies the worktree policy, and soft
-deletes the record. Never deletes worker files: a dirty worktree is kept.
+deletes the record. Never deletes worker files: a dirty worktree is kept. The
+returned session has `hc_terminal_id: null`, matching the stored row.
 
 ## prune
 
@@ -131,6 +141,9 @@ pruned 2 sessions, removed 2 directories, freed 4.0 KiB
 kept: session 'x': refusing to remove /elsewhere (outside ...)
 ```
 
+Exits 1 when any row was kept, including in `--dry-run`; the JSON payload
+still lists every `errors` entry.
+
 ## send
 
 ```text
@@ -139,7 +152,8 @@ agentctl --workspace PATH send NAME -          # read stdin
 ```
 
 Text is passed as one argv element: quotes, `$VAR`, leading `-` and newlines are
-preserved. Delivery must be confirmed: a session whose agent reports status
+preserved. `send NAME -` reads stdin and refuses a terminal: pipe the text
+instead of expecting an agent to type it. Delivery must be confirmed: a session whose agent reports status
 (codex/opencode do not) waits up to 15 s for a status report and then fails
 with exit code 8 (`delivery_unconfirmed`) rather than typing blindly. An agent
 that does not report status at all fails immediately. `--force` skips the
@@ -181,7 +195,8 @@ agentctl --workspace PATH read NAME [--lines N] [--follow]
 Prints the screen plus `N` history lines (default 50). When HC can only show the
 screen (agent busy or full-screen app), a `[agentctl] partial: screen only (…)`
 line marks it. `--follow` reprints while the content changes until the session
-is no longer live.
+is no longer live; it cannot be combined with `--json`, because it never ends
+and emits text snapshots.
 
 ## status
 
@@ -191,7 +206,7 @@ agentctl --workspace PATH status [NAME]
 
 One session or the whole workspace, refreshed from the runtime:
 `starting`, `idle`, `working`, `waiting`, `completed`, `failed`, `stopped`,
-`unknown`, `unreachable`.
+`unknown`, `unreachable`. `--no-refresh` returns the stored status only.
 
 ## wait
 

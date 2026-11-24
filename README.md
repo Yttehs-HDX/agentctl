@@ -68,7 +68,7 @@ the same sessions and the same terminals.
 | `config set\|get\|list` | `default-agent`, `session.default-mode`, `agents.<id>.enabled` |
 
 Every command accepts `--json`. `--workspace` is mandatory for workspace and session
-commands; it is never inferred from the current directory.
+commands, or set `AGENTCTL_WORKSPACE`; it is never inferred from the current directory.
 
 ## Status words
 

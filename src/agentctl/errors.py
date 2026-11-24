@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from agentctl import JSON_SCHEMA
+
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_USAGE = 2
@@ -38,7 +40,7 @@ class AgentctlError(Exception):
         }
         if self.hint:
             body["hint"] = self.hint
-        return {"error": body}
+        return {"schema": JSON_SCHEMA, "error": body}
 
 
 class UsageError(AgentctlError):

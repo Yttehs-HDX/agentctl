@@ -23,6 +23,7 @@ Herdr Core.
 | `test_prune.py` | dry run, directory/row removal, live rows and outside paths kept |
 | `test_recovery.py` | leader restart: same identity, same sessions, `recover`, isolation |
 | `test_worktree.py` | worktree creation, branch naming, cleanup policy, non-git rejection |
+| `test_cli.py` | JSON envelope and schema, `--json` argv handling, usage errors |
 
 `conftest.py` supplies:
 

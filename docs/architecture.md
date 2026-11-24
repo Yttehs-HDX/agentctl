@@ -36,6 +36,123 @@ Rules kept by the code:
   `RuntimeAdapter`, and it is the only place that maps runtime facts to status.
 - `workspace/` knows nothing about agents or terminals.
 
+## v0.2: event-driven orchestration
+
+v0.1 answered "what is this session doing right now". v0.2 answers "what happened
+while I was busy", which needs three things v0.1 did not have: an identity for
+the Leader that can be lost, a durable record of each dispatched message, and a
+process that listens when no CLI command is running.
+
+```text
+cli.py
+├── workspace/discovery.py     flag > env > cwd > nearest registered parent
+├── leader/service.py          lease, epoch, token, fencing
+├── messaging/
+│   ├── transitions.py         the legal state machine, testable without SQL
+│   └── service.py             enqueue, dispatch, ACK, complete, honest unknowns
+├── events/
+│   ├── bus.py                 append-only log + Leader inbox, dedupe by key
+│   └── ingest.py              Herdr Core terminal facts → agentctl events
+├── spool.py                   hook observations → registry (atomic claim)
+├── integrations/              per-harness hook assets and capabilities
+├── daemon/service.py          agentctld: stream, lease, dispatch, delivery
+└── diagnostics.py             doctor
+```
+
+Rules kept by the new code:
+
+- `messaging/transitions.py` owns the state vocabulary; no service invents one.
+- Only `integrations/` knows a harness's event names.
+- Only `events/ingest.py` maps runtime facts to events, and it is pure.
+- The daemon composes services; it holds no state the database does not.
+
+## Leader lease
+
+`leader_leases` has one row per workspace, so SQLite's own write serialization
+arbitrates a claim. The row carries `leader_instance_id`, `leader_epoch`,
+`lease_token` and `expires_at`.
+
+```text
+attach   no live lease, or the same instance  → claim / renew, epoch unchanged
+attach   a live lease held by someone else     → LeaderConflict
+takeover forced                                → epoch + 1, new token
+expire   renewed_at + lease_seconds passed     → claimable again
+```
+
+Fencing is `authorize()`: once a lease exists, a mutating command must present
+its token, and an old token fails because the stored epoch moved on. Before any
+lease exists the workspace is unclaimed, so single-operator use is unchanged.
+
+## Message lifecycle
+
+```text
+queued ─dispatch─▶ dispatching ─accepted─▶ dispatched ─ACK─▶ acknowledged
+   ▲                    │                      │                  │
+   └──refused───────────┘                      │                  ▼
+                                               │               running
+                                               ▼                  │
+                                        delivery_unknown          ▼
+                                                          completed / failed
+```
+
+- The row is written **before** the text is sent, and `dispatching` is committed
+  before the transport call. A crash in that window leaves a row the sweep turns
+  into `delivery_unknown`, never into a silent retry.
+- One message is in flight per session (a partial unique index); queued messages
+  wait. That is what makes per-worker ordering real, while workers stay parallel.
+- An ACK names a message id. The hook reads it out of the text it received, so
+  the ACK proves *that* message arrived, not merely that the worker was idle.
+- `retry` refuses `delivery_unknown` on purpose: the text may already be in the
+  worker's context.
+
+## Hooks report through a spool, not a subprocess
+
+Measured on OMP 19.1.0: `pi.exec` cannot spawn from an `input` handler
+(`ENOENT ... posix_spawn`), and an extension that declares no flag is loaded only
+after the first prompt. So the generated hook:
+
+- registers a flag, forcing an eager load;
+- appends one JSON line per observation to `$AGENTCTL_HOME/spool/<agent>.jsonl`
+  (`node:fs` works from every handler);
+- never throws into the host.
+
+Any CLI command and the daemon drain that spool. A drain `rename`s the file
+before reading it, so one reader owns each record and a concurrent append always
+lands in a fresh file. Ingest re-checks workspace and session, so a record can
+never mark another session's message delivered.
+
+## Event model
+
+```text
+{"schema_version": 1, "event_id": "evt_…", "event": "turn.completed",
+ "workspace_id": "ws_…", "session_id": "sess_…", "message_id": "msg_…",
+ "leader_epoch": 1, "source": "omp", "severity": "info",
+ "timestamp": "2026-11-25T00:00:00+00:00", "payload": {}, "dedupe_key": "…"}
+```
+
+`turn.completed` means the worker's conversation turn ended. It does **not**
+mean the task succeeded; the result text is in the payload and the judgement
+stays with the Leader.
+
+Leader-relevant events also get an `inbox` row. Delivery is a harness wake where
+one exists (`Stop` hook returning `decision: "block"`, or
+`sendMessage({triggerTurn: true})` at settle); otherwise the row simply waits.
+Dedupe is `(workspace, event, dedupe_key)`, so a replayed hook is a no-op.
+
+## agentctld
+
+One supervised process per workspace, started with `agentctl daemon start`:
+
+```text
+loop:  ingest spool → dispatch queued → run outbox → deliver inbox → sleep 1 s
+bg:    hc events --json --label agentctl.workspace=<id>, reconnecting on loss
+       heartbeat the lease every lease_seconds / 3
+```
+
+A restart re-reads `outbox`/`inbox`, so crash recovery is "the work is still
+pending", not a replay of side effects. A lost lease stops dispatch: a fenced
+Leader must not act.
+
 ## Data model
 
 ```sql

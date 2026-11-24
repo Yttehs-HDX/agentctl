@@ -6,12 +6,24 @@ Global options come before the command:
 agentctl [--workspace PATH] [--json] <command> [options]
 ```
 
-- `--workspace PATH` — Leader workspace root. Required for `init`, `info`,
-  `list`, `create`, `delete`, `prune`, `send`, `keys`, `interrupt`, `read`,
-  `status`, `wait`, `recover`, unless `AGENTCTL_WORKSPACE` is set. The flag
-  wins over the environment variable. The path is resolved with `realpath`, so
-  a symlink and its target share one workspace. It is never inferred from the
-  current directory.
+- `--workspace PATH` — Leader workspace root. Optional. Resolution order:
+
+  1. `--workspace PATH`
+  2. `AGENTCTL_WORKSPACE`
+  3. the registered workspace whose root is the current directory
+  4. the nearest registered workspace above it (nested workspaces resolve to the
+     innermost one)
+
+  Every path is canonicalized with `realpath`, so a symlink and its target share
+  one workspace. Discovery never creates a workspace and never guesses: with no
+  registered root at or above the current directory the command fails with
+  `workspace_not_initialized` and exit 4. `init` is the one command that may
+  name an unregistered directory; without arguments it registers the current
+  directory.
+- `--lease-token TOKEN` — Leader lease token, also `AGENTCTL_LEASE_TOKEN`. Once
+  a Leader has attached to the workspace, mutating commands must present it.
+- `--leader-instance ID` — this Leader run's instance id, also
+  `AGENTCTL_LEADER_INSTANCE`.
 - `--json` — machine-readable output. Accepted before or after the command.
   Everything after a `--` terminator is caller data, so a literal `--json`
   message is sendable as `send NAME -- --json`. JSON objects carry
@@ -144,12 +156,111 @@ kept: session 'x': refusing to remove /elsewhere (outside ...)
 Exits 1 when any row was kept, including in `--dry-run`; the JSON payload
 still lists every `errors` entry.
 
+## leader
+
+```text
+agentctl leader attach   [--instance ID] [--takeover]
+agentctl leader detach
+agentctl leader status
+agentctl leader heartbeat
+agentctl leader takeover [--instance ID]
+```
+
+- `attach` claims the lease and prints the instance id, epoch, token and expiry.
+  Re-attaching the same instance is a renewal and keeps the epoch. A second
+  instance is refused while the lease is live.
+- `takeover` replaces a live or expired Leader and increments `leader_epoch`.
+  Every token from an earlier epoch stops working: that is fencing.
+- `heartbeat` renews. Safe to call from a Leader hook each turn.
+- `detach` releases immediately instead of waiting for expiry.
+- `status` reports the holder, the remaining time and the inbox depth.
+
+Default lease is 120 s. A local process compares tokens; it is not an OS
+sandbox, and the same Unix user can always read the database.
+
+## messages
+
+```text
+agentctl messages list [--state STATE] [--session NAME] [--limit N]
+agentctl messages get MESSAGE_ID
+agentctl messages retry MESSAGE_ID
+agentctl messages cancel MESSAGE_ID
+```
+
+States: `queued`, `dispatching`, `dispatched`, `acknowledged`, `running`,
+`completed`, `failed`, `cancelled`, `delivery_unknown`. `messages get` prints
+what the state means. `retry` accepts a `failed` or `queued` message and refuses
+`delivery_unknown`: the text may already have reached the worker.
+
+## events
+
+```text
+agentctl events list [--after EVENT_ID] [--event NAME] [--limit N]
+agentctl events watch [--interval S]
+```
+
+`turn.completed` means the worker's turn ended, not that the task succeeded.
+
+## inbox
+
+```text
+agentctl inbox list [--all]
+agentctl inbox ack INBOX_OR_EVENT_ID
+```
+
+The inbox holds events a Leader must act on. `ack` is idempotent and stops
+re-delivery. A worker whose harness has no wake path leaves its events here.
+
+## daemon
+
+```text
+agentctl daemon start [--foreground] [--once] [--instance ID]
+agentctl daemon stop
+agentctl daemon status
+```
+
+`start` runs `agentctld` detached (state in `$AGENTCTL_HOME/daemon.json`, log in
+`daemon.log`). It follows the Herdr Core event stream, renews the lease,
+dispatches queued messages one per worker, drains the hook spool and delivers
+Leader-relevant events. `--once` runs a single pass for diagnostics.
+
+## integrations
+
+```text
+agentctl integrations list
+agentctl integrations inspect AGENT
+agentctl integrations install AGENT [--scope user|project]
+agentctl integrations uninstall AGENT [--scope user|project]
+```
+
+`AGENT` is `omp`, `pi` or `claude`. Install is idempotent, writes only under
+`$AGENTCTL_HOME/integrations/<agent>/`, and never edits the harness's own
+configuration. `list` marks a harness `verified` only if its capabilities were
+measured here; codex and opencode are listed as unsupported with the reason.
+
+## doctor
+
+```text
+agentctl doctor
+```
+
+One pass over the runtime, the resolved workspace, the Leader lease, the daemon,
+each agent's version drift and each installed hook. Exits 1 when any check
+fails.
+
 ## send
 
 ```text
-agentctl --workspace PATH send NAME TEXT [--force]
+agentctl --workspace PATH send NAME TEXT [--force] [--wait SECONDS] [--sync]
 agentctl --workspace PATH send NAME -          # read stdin
 ```
+
+Default is asynchronous: the text is persisted, dispatched if the worker is
+idle, and the command returns a message id at once. `--wait N` turns it into a
+barrier that returns when the message's turn ends or the timeout expires
+(`timed_out: true` is a check-in, not a failure). `--force` types even when no
+ACK can be expected and records `delivery_unknown`. `--sync` keeps the v0.1
+behaviour: type now and wait for a status report instead of queueing.
 
 Text is passed as one argv element: quotes, `$VAR`, leading `-` and newlines are
 preserved. `send NAME -` reads stdin and refuses a terminal: pipe the text

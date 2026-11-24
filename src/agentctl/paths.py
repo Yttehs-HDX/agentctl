@@ -48,3 +48,8 @@ def launcher_path() -> Path:
 def integrations_dir() -> Path:
     """Where agentctl keeps the hook assets it hands to harnesses."""
     return config_dir() / "integrations"
+
+
+def spool_dir() -> Path:
+    """Where harness hooks append their observations for later ingest."""
+    return config_dir() / "spool"

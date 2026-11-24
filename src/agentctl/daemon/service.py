@@ -180,7 +180,8 @@ class Daemon:
             "log": str(log_path()),
         }
         path = state_path()
-        tmp = path.with_suffix(".tmp")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(json.dumps(payload, indent=2) + "\n")
         os.replace(tmp, path)
 
@@ -287,6 +288,20 @@ class Daemon:
                 last_error=reason,
             )
         )
+
+    def ingest_hooks(self) -> None:
+        """Apply what harness hooks spooled since the last pass."""
+        from agentctl.spool import drain
+
+        try:
+            report = drain(self.store, self.workspace)
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"spool drain failed: {exc}")
+            return
+        if report.applied:
+            self.log(f"ingested {len(report.applied)} hook record(s)")
+        for rejection in report.rejected[:5]:
+            self.log(f"hook record rejected: {rejection.get('reason')}")
 
     def pump_inbox(self) -> None:
         """Offer pending events to the Leader, honestly reporting failure."""
@@ -427,7 +442,7 @@ class Daemon:
             if started - last_heartbeat >= max(5.0, self.config.lease_seconds / 3):
                 self.heartbeat()
                 last_heartbeat = started
-            for step in (self.pump_messages, self.pump_outbox, self.pump_inbox):
+            for step in (self.ingest_hooks, self.pump_messages, self.pump_outbox, self.pump_inbox):
                 try:
                     step()
                 except Exception as exc:  # noqa: BLE001
@@ -436,6 +451,7 @@ class Daemon:
 
     def run_once(self) -> dict[str, object]:
         """One full pass, for tests and for `daemon run --once`."""
+        self.ingest_hooks()
         self.pump_messages()
         self.pump_outbox()
         self.pump_inbox()

@@ -189,7 +189,11 @@ def test_stuck_dispatch_becomes_delivery_unknown(env) -> None:
     # Simulate a crash after `dispatching` was written and before the outcome.
     with transaction(store.conn):
         store.messages.update_state(
-            message.id, "dispatching", expected=["queued"], stamp="2000-01-01T00:00:00+00:00"
+            message.id,
+            "dispatching",
+            expected=["queued"],
+            set_dispatched=True,
+            stamp="2000-01-01T00:00:00+00:00",
         )
     recovered = service.recover_stuck(ws, older_than_seconds=0)
     assert [m.id for m in recovered] == [message.id]

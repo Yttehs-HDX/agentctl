@@ -181,9 +181,23 @@ def _open(state: State) -> Iterator[tuple[Config, Store, HerdrCoreAdapter]]:
 
 
 def _workspace(state: State, store: Store):
-    """Resolve this command's workspace (flag > env > cwd > nearest parent)."""
+    """Resolve this command's workspace (flag > env > cwd > nearest parent).
+
+    Hook observations are drained first: a worker may have reported while no
+    command was running, and every reader below must see that report.
+    """
     choice = discover(store, explicit=state.workspace_arg, env=state.env_workspace())
+    _ingest(store, choice.workspace)
     return choice.workspace
+
+
+def _ingest(store: Store, workspace) -> None:
+    from agentctl.spool import drain
+
+    try:
+        drain(store, workspace)
+    except Exception:  # noqa: BLE001 - ingest must never break a command
+        pass
 
 
 # ----------------------------------------------------------------------- setup

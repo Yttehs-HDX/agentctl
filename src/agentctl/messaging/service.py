@@ -197,6 +197,7 @@ class MessageService:
                 "dispatching",
                 expected=["queued"],
                 increment_attempt=True,
+                set_dispatched=True,
                 stamp=now(),
             )
             if not moved:
@@ -493,6 +494,8 @@ class MessageService:
         A row is stuck when its process died between writing `dispatching` and
         writing the outcome. The only honest reading is "we do not know", so it
         becomes `delivery_unknown` and is excluded from automatic dispatch.
+        Age is measured from `dispatched_at`, which `dispatch()` stamps as the
+        attempt begins, so a long-queued message is not mistaken for a stale one.
         """
         from agentctl.clock import elapsed_since
 
@@ -500,7 +503,7 @@ class MessageService:
         for message in self.store.messages.list_for_workspace(
             workspace.id, states=["dispatching"], limit=500
         ):
-            age = elapsed_since(message.created_at)
+            age = elapsed_since(message.dispatched_at or message.created_at)
             if age is not None and age < older_than_seconds:
                 continue
             self._to_unknown(workspace, message, "dispatch was interrupted before its outcome was recorded")

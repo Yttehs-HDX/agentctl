@@ -136,6 +136,12 @@ def record_turn_completed(
     runtime = HerdrCoreAdapter()
     lifecycle = LifecycleManager(store, runtime)
     service = MessageService(store, runtime, lifecycle, bus=bus)
+    # A settle is proof the turn for the in-flight message ended, whether or not
+    # its ingress ACK was observed. Falling back to the session's in-flight row
+    # keeps a missed ACK from stranding the message in `dispatched` forever.
+    if not message_id and session_id:
+        active = store.messages.active_for_session(session_id)
+        message_id = active.id if active is not None else None
     if message_id:
         found = store.messages.find_in_workspace(workspace.id, message_id)
         if found is None:
@@ -178,6 +184,9 @@ def record_turn_failed(
     runtime = HerdrCoreAdapter()
     lifecycle = LifecycleManager(store, runtime)
     service = MessageService(store, runtime, lifecycle, bus=bus)
+    if not message_id and session_id:
+        active = store.messages.active_for_session(session_id)
+        message_id = active.id if active is not None else None
     if message_id:
         if store.messages.find_in_workspace(workspace.id, message_id) is None:
             raise UsageError(f"no message {message_id!r} in this workspace")

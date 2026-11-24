@@ -107,6 +107,16 @@ class ExtensionAdapter(HarnessAdapter):
     def asset_path(self) -> Path:
         return self.asset_dir() / self.hook_filename
 
+    def spool_path(self) -> Path:
+        """The file the hook appends to. One per install, shared by sessions.
+
+        Records carry their own session id, so one file is enough and the hook
+        never needs to know a path per session.
+        """
+        from agentctl.paths import spool_dir
+
+        return spool_dir() / f"{self.agent}.jsonl"
+
     def install(self, workspace: Workspace, *, scope: str = "user") -> dict[str, object]:
         write_launcher()
         source = self._source()
@@ -176,9 +186,7 @@ class OmpAdapter(ExtensionAdapter):
     default_agent_dir = OMP_DEFAULT_AGENT_DIR
 
     def _source(self) -> str:
-        from agentctl.paths import launcher_path
-
-        return omp_hook(str(launcher_path()))
+        return omp_hook(str(self.spool_path()))
 
     def _ambient_path(self, workspace: Workspace, scope: str) -> Path | None:
         if scope == "project":
@@ -210,9 +218,7 @@ class PiAdapter(ExtensionAdapter):
     default_agent_dir = PI_DEFAULT_AGENT_DIR
 
     def _source(self) -> str:
-        from agentctl.paths import launcher_path
-
-        return pi_hook(str(launcher_path()))
+        return pi_hook(str(self.spool_path()))
 
     def _ambient_path(self, workspace: Workspace, scope: str) -> Path | None:
         if scope == "project":

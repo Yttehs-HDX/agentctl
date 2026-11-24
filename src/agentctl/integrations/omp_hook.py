@@ -7,23 +7,24 @@ filled in.
 
 API facts this template depends on, all measured on the installed binaries:
 
-- `pi.exec(command, args, options?)` is async and returns
-  `{stdout, stderr, code, ...}`. `args` are passed to the process without a
-  shell, so quotes, `$` and newlines in a payload cannot be re-interpreted.
+- `pi.exec` **cannot spawn from an `input` handler**: it rejects with
+  `ENOENT ... posix_spawn` (OMP 19.1.0). The hook therefore reports by appending
+  a JSON line to a spool file; `node:fs` works from every handler.
 - `pi.on("input", ...)` sees submitted text with `source: "interactive"` when a
   human (or `hc send`) types into the TUI.
-- `pi.on("agent_settled", ...)` is the final boundary of a run.
-- `pi.sendMessage(payload, {triggerTurn: true, deliverAs: "followUp"})` while idle
-  starts a real model turn.
+- `pi.on("agent_end", ...)` fires at the end of each run; `agent_settled` did
+  **not** fire in the TUI on 19.1.0, so the hook uses `agent_end`, which is
+  emitted for every turn including the first.
+- An extension that declares no flag and no shortcut is loaded only after the
+  first prompt, so it would miss that message; `registerFlag` forces an eager
+  load.
 
 What the hook does, and only this:
 
-- writes `session.created` once per session,
-- on ingress, reads the agentctl message id out of the text and reports the
-  exact ACK plus `turn.started`,
-- when the run settles, reports `turn.completed` for that message,
-- then asks agentctl for a one-line notice and, if there is one, wakes the
-  session with it.
+- spools `session_started` once per session,
+- on ingress, reads the agentctl message id out of the text and spools the exact
+  acknowledgement for it,
+- when the run settles, spools `turn_completed` with a short result summary.
 
 It never calls a model itself and never invents an event it did not observe.
 """
@@ -35,48 +36,16 @@ _TEMPLATE = """// agentctl integration hook for {agent}.
 // Edit nothing here: adapt `agentctl` instead.
 
 import type {{ ExtensionAPI }} from "{import_specifier}";
+import {{ appendFileSync, mkdirSync }} from "node:fs";
+import {{ dirname }} from "node:path";
 
 const AGENT = "{agent}";
-// A result summary is a courtesy for the Leader, not a transport of record, so
-// it is capped well below any argv limit.
+// Written by agentctl when the session was created. The hook needs no PATH, no
+// environment lookup and no subprocess: it appends one line here.
+const SPOOL = "{spool}";
+const WORKSPACE = process.env.AGENTCTL_WORKSPACE_ID ?? "";
+const SESSION = process.env.AGENTCTL_SESSION_ID ?? "";
 const SUMMARY_LIMIT = 2000;
-
-type ExecLike = {{
-  exec: (command: string, args?: string[], options?: Record<string, unknown>) => Promise<
-    {{ stdout?: string; stderr?: string; code?: number }} | string
-  >;
-}};
-
-// Absolute launcher path, baked in when the hook is generated. A worker's PATH
-// and environment are the harness's business, not agentctl's, so nothing here
-// depends on either.
-const LAUNCHER = "{launcher}";
-
-// `pi.exec` resolves for a failing command instead of throwing, so the exit code
-// is the only error signal there is. Without this check every hook failure would
-// look like success, which is exactly how a lost ACK stays invisible.
-// Measured on Pi 1.5.2 / OMP 19.1.0: `pi.exec` accepts no `env` option and
-// starts the command with the harness's own environment. The launcher therefore
-// carries its own AGENTCTL_HOME, so a hook works inside a fresh profile with no
-// environment inherited from the session that created it.
-async function call(pi: ExecLike, args: string[]): Promise<string> {{
-  const result = await pi.exec(LAUNCHER, args, {{ timeout: 15000 }});
-  if (typeof result === "string") return result.trim();
-  const stdout = (result?.stdout ?? "").trim();
-  if (typeof result?.code === "number" && result.code !== 0) {{
-    const stderr = (result?.stderr ?? "").trim();
-    throw new Error(`agentctl ${{args[0]}} ${{args[1] ?? ""}} exited ${{result.code}}: ${{stderr || stdout}}`);
-  }}
-  return stdout;
-}}
-
-function workspace(): string | null {{
-  return process.env.AGENTCTL_WORKSPACE_ID ?? null;
-}}
-
-function session(): string | null {{
-  return process.env.AGENTCTL_SESSION_ID ?? null;
-}}
 
 function clip(text: string | null): string {{
   if (!text) return "";
@@ -84,86 +53,79 @@ function clip(text: string | null): string {{
   return flat.length > SUMMARY_LIMIT ? flat.slice(0, SUMMARY_LIMIT) + "…" : flat;
 }}
 
+// One JSON line per observation. A hook must never throw into the host, and a
+// failed write must stay invisible rather than break the worker's turn.
+function spool(kind: string, extra: Record<string, unknown> = {{}}): void {{
+  if (!SPOOL || !WORKSPACE || !SESSION) return;
+  try {{
+    mkdirSync(dirname(SPOOL), {{ recursive: true }});
+    appendFileSync(
+      SPOOL,
+      JSON.stringify({{ kind, workspace_id: WORKSPACE, session_id: SESSION, agent: AGENT, ...extra }}) + "\\n",
+    );
+  }} catch {{
+    // Nothing a hook can do about a full disk; the message stays unacknowledged,
+    // which is the honest outcome.
+  }}
+}}
+
 export default function (pi: ExtensionAPI): void {{
-  const ws = workspace();
-  const sid = session();
-  if (!ws || !sid) return; // started outside agentctl: stay inert
+  if (!WORKSPACE || !SESSION) return; // started outside agentctl: stay inert
 
-  const exec = pi as unknown as ExecLike;
-  let currentMessage: string | null = null;
+  // Registering a flag makes the host load this extension eagerly. Measured on
+  // OMP 19.1.0: an extension that declares neither a flag nor a shortcut is
+  // deferred until after the first prompt, so it misses that message.
+  try {{
+    pi.registerFlag("agentctl", {{
+      description: "agentctl integration (loaded by agentctl; not a user flag)",
+      type: "boolean",
+      default: false,
+    }});
+  }} catch {{
+    // Hosts without registerFlag still work, just with a deferred load.
+  }}
+
   let announced = false;
-  let settling = false;
+  let currentMessage: string | null = null;
 
-  // A hook must never break the host session, but a silent failure makes an
-  // ACK look delivered when it was not. Failures are logged through the host's
-  // own logger so they land in the harness log, not in a void.
-  const report = async (args: string[]): Promise<boolean> => {{
-    try {{
-      await call(exec, args);
-      return true;
-    }} catch (error) {{
-      try {{
-        pi.logger?.warn?.(`agentctl hook ${{args[1] ?? args[0]}} failed: ${{String(error)}}`);
-      }} catch {{
-        // logging is best effort
-      }}
-      return false;
-    }}
-  }};
-
-  // OMP defers an extension that registers no shortcuts or flags at TUI start,
-  // so `session_start` can fire before this handler binds. Announcing lazily
-  // from the first event observed still reports the session exactly once.
-  const ensureStarted = async (): Promise<void> => {{
+  const announce = (): void => {{
     if (announced) return;
     announced = true;
-    await report(["hook", "session-started", "--workspace", ws, "--session", sid]);
+    spool("session_started");
   }};
 
-  pi.on("session_start", ensureStarted);
+  pi.on("session_start", announce);
 
   pi.on("input", async event => {{
-    await ensureStarted();
+    announce();
     if (event.source === "extension") return undefined;
     const text: string = (event as {{ text?: string }}).text ?? "";
     const match = text.match(/\\[\\[agentctl:(msg_[A-Za-z0-9_-]+)\\]\\]/);
     if (!match) return undefined;
     currentMessage = match[1];
-    await report([
-      "hook", "received",
-      "--workspace", ws,
-      "--session", sid,
-      "--message", currentMessage,
-      "--source", AGENT,
-    ]);
+    spool("message_received", {{ message_id: currentMessage }});
     return undefined;
   }});
 
   pi.on("session_stop", async event => {{
     if (!currentMessage) return;
     if ((event as {{ aborted?: boolean }}).aborted) {{
-      await report([
-        "hook", "turn-failed",
-        "--workspace", ws,
-        "--session", sid,
-        "--message", currentMessage,
-        "--source", AGENT,
-        "--reason", "the run was interrupted",
-      ]);
+      spool("turn_failed", {{ message_id: currentMessage, reason: "the run was interrupted" }});
     }}
   }});
 
-  pi.on("agent_settled", async (_event, ctx) => {{
-    await ensureStarted();
+  // Measured on OMP 19.1.0: `agent_settled` never fired in the TUI, while
+  // `agent_end` fired once per run. The hook therefore reports completion from
+  // `agent_end`, which is the event the host actually emits.
+  pi.on("agent_end", async (_event, ctx) => {{
+    announce();
     const messageId = currentMessage;
-    if (!messageId || settling) return;
-    settling = true;
     currentMessage = null;
     let summary = "";
     try {{
       const entries: unknown[] = ctx?.sessionManager?.getEntries?.() ?? [];
       for (const entry of entries.slice().reverse()) {{
-        const message = (entry as {{ type?: string; message?: {{ role?: string; content?: unknown[] }} }}).message;
+        const message = (entry as {{ message?: {{ role?: string; content?: unknown[] }} }}).message;
         if (message?.role !== "assistant") continue;
         summary = clip(
           (message.content ?? [])
@@ -177,36 +139,20 @@ export default function (pi: ExtensionAPI): void {{
     }} catch {{
       summary = "";
     }}
-    await report([
-      "hook", "turn-completed",
-      "--workspace", ws,
-      "--session", sid,
-      "--message", messageId,
-      "--source", AGENT,
-      "--result", summary,
-    ]);
-    settling = false;
-
-    // Wake the Leader only when there is something to say.
-    try {{
-      const notice = await call(exec, ["hook", "pending", "--workspace", ws]);
-      if (notice) {{
-        await pi.sendMessage(
-          {{ customType: "agentctl", content: notice, display: true }},
-          {{ triggerTurn: true, deliverAs: "followUp" }},
-        );
-      }}
-    }} catch {{
-      // No live Leader: the inbox row keeps the event for later.
-    }}
+    // No message id is fine: ingest closes whatever the session has in flight.
+    spool("turn_completed", {{ message_id: messageId, result: summary }});
   }});
 }}
 """
 
 
-def omp_hook(launcher: str) -> str:
-    return _TEMPLATE.format(agent="omp", import_specifier="@oh-my-pi/pi-coding-agent", launcher=launcher)
+def omp_hook(spool: str) -> str:
+    return _TEMPLATE.format(
+        agent="omp", import_specifier="@oh-my-pi/pi-coding-agent", spool=spool
+    )
 
 
-def pi_hook(launcher: str) -> str:
-    return _TEMPLATE.format(agent="pi", import_specifier="@earendil-works/pi-coding-agent", launcher=launcher)
+def pi_hook(spool: str) -> str:
+    return _TEMPLATE.format(
+        agent="pi", import_specifier="@earendil-works/pi-coding-agent", spool=spool
+    )

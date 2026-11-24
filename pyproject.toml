@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "agentctl"
-version = "0.1.0"
-description = "Workspace-scoped agent session manager on top of Herdr Core"
+version = "0.2.0"
+description = "Event-driven agent orchestration runtime on top of Herdr Core"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [

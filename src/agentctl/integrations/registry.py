@@ -202,7 +202,7 @@ class OmpAdapter(ExtensionAdapter):
             turn_completed=True,
             turn_failed=True,
             verified=True,
-            notes="measured on 19.1.0: input, turn_start, agent_settled, sendMessage(triggerTurn)",
+            notes="measured on 19.1.0: input, turn_start, agent_end; completion reported from agent_end",
         )
 
     def notify_leader(self, event: dict, *, lease, session) -> bool:
@@ -234,7 +234,7 @@ class PiAdapter(ExtensionAdapter):
             turn_completed=True,
             turn_failed=True,
             verified=True,
-            notes="measured on 1.5.2: input, turn_start, agent_settled, sendMessage(triggerTurn)",
+            notes="measured on 1.5.2: input, turn_start, agent_end, agent_settled",
         )
 
     def notify_leader(self, event: dict, *, lease, session) -> bool:

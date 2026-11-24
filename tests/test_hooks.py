@@ -186,3 +186,24 @@ def test_resolve_workspace_reports_a_clear_error(env) -> None:
         resolve_workspace(store, None)
     with pytest.raises(UsageError):
         resolve_workspace(store, "ws_missing")
+
+
+def test_unbound_turn_completion_dedupes_on_content(env) -> None:
+    """Claude's Stop hook can fire again with no message in flight.
+
+    The same turn reported twice must not create two events, so the dedupe key
+    cannot contain the clock.
+    """
+    store, ws, session, _other, _messages = env
+    for _ in range(3):
+        record_turn_completed(store, ws, session.id, message_id=None, source="claude", result="done")
+    events = [e for e in EventBus(store).list(ws) if e.event == "turn.completed"]
+    assert len(events) == 1
+
+
+def test_distinct_unbound_turns_are_separate_events(env) -> None:
+    store, ws, session, _other, _messages = env
+    record_turn_completed(store, ws, session.id, message_id=None, source="claude", result="first")
+    record_turn_completed(store, ws, session.id, message_id=None, source="claude", result="second")
+    events = [e for e in EventBus(store).list(ws) if e.event == "turn.completed"]
+    assert len(events) == 2

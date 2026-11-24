@@ -13,7 +13,6 @@ import json
 import sys
 from dataclasses import dataclass
 
-from agentctl.clock import now
 from agentctl.errors import AgentctlError, UsageError
 from agentctl.events.bus import EventBus
 from agentctl.messaging.service import find_marker
@@ -155,14 +154,18 @@ def record_turn_completed(
         )
         return {"completed": True, "message": message.state}
     # No message in flight: still record the turn, without inventing a binding.
+    # The key is the turn's own content, not the clock: a hook that reports the
+    # same turn twice (Claude's Stop runs on retries too) must not create a new
+    # event. `now()` in the key would make every replay look unique.
     if session_id:
+        fingerprint = (result or "").strip()[:120]
         bus.emit(
             workspace,
             "turn.completed",
             session_id=session_id,
             source=source,
             payload={"result": result, "message_id": None},
-            dedupe_key=f"{session_id}:{now()}:turn.completed",
+            dedupe_key=f"{session_id}:unbound:{fingerprint}",
         )
     return {"completed": True, "message": None}
 
@@ -195,13 +198,14 @@ def record_turn_failed(
         )
         return {"failed": True, "message": message.state}
     if session_id:
+        fingerprint = (reason or "").strip()[:120]
         bus.emit(
             workspace,
             "turn.failed",
             session_id=session_id,
             source=source,
             payload={"reason": reason},
-            dedupe_key=f"{session_id}:{now()}:turn.failed",
+            dedupe_key=f"{session_id}:unbound:{fingerprint}:failed",
         )
     return {"failed": True, "message": None}
 

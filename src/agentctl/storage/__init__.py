@@ -7,7 +7,17 @@ from contextlib import contextmanager
 
 from agentctl.paths import database_path
 from agentctl.storage.database import connect, initialize
-from agentctl.storage.repository import SessionRepository, WorkspaceRepository
+from agentctl.storage.repository import (
+    ConsumerOffsetRepository,
+    EventRepository,
+    InboxRepository,
+    IntegrationRepository,
+    LeaseRepository,
+    MessageRepository,
+    OutboxRepository,
+    SessionRepository,
+    WorkspaceRepository,
+)
 
 
 def open_connection(path=None) -> sqlite3.Connection:
@@ -38,3 +48,10 @@ class Store:
         self.conn = conn
         self.workspaces = WorkspaceRepository(conn)
         self.sessions = SessionRepository(conn)
+        self.leases = LeaseRepository(conn)
+        self.messages = MessageRepository(conn)
+        self.events = EventRepository(conn)
+        self.inbox = InboxRepository(conn)
+        self.outbox = OutboxRepository(conn)
+        self.offsets = ConsumerOffsetRepository(conn)
+        self.integrations = IntegrationRepository(conn)

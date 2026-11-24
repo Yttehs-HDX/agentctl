@@ -148,3 +148,56 @@ class DeliveryUnconfirmed(AgentctlError):
 
 class RuntimeFinished(RuntimeFailure):
     code = "runtime_finished"
+
+
+class LeaderRequired(AgentctlError):
+    """A control operation needs the workspace's Leader lease."""
+
+    code = "leader_required"
+    exit_code = EXIT_BLOCKED  # 8
+
+
+class LeaderConflict(AgentctlError):
+    """Another Leader instance holds, or took over, the lease."""
+
+    code = "leader_conflict"
+    exit_code = EXIT_CONFLICT  # 5
+
+
+class MessageNotFound(AgentctlError):
+    code = "message_not_found"
+    exit_code = EXIT_NOT_FOUND
+
+
+class MessageStateError(AgentctlError):
+    """The requested transition is not legal for this message state."""
+
+    code = "message_state"
+    exit_code = EXIT_CONFLICT
+
+
+class MessageBusy(AgentctlError):
+    """Another message for this session is still in flight."""
+
+    code = "message_busy"
+    exit_code = EXIT_CONFLICT
+
+
+class EventNotFound(AgentctlError):
+    code = "event_not_found"
+    exit_code = EXIT_NOT_FOUND
+
+
+class DaemonError(AgentctlError):
+    code = "daemon_error"
+    exit_code = EXIT_RUNTIME
+
+
+class DaemonNotRunning(AgentctlError):
+    code = "daemon_not_running"
+    exit_code = EXIT_NOT_READY
+
+
+class IntegrationError(AgentctlError):
+    code = "integration_error"
+    exit_code = EXIT_ERROR

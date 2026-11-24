@@ -165,6 +165,12 @@ class SessionService:
             Path(native_dir).mkdir(parents=True, exist_ok=True)
             argv.extend([definition.session_dir_flag, native_dir])
 
+        # The harness hook is loaded explicitly by path, which is the only load
+        # path measured to work regardless of the worker's config directory.
+        from agentctl.integrations.registry import launch_args_for
+
+        argv.extend(launch_args_for(self.store, workspace.id, agent_id))
+
         worktree_path: str | None = None
         worktree_branch: str | None = None
         git_root: str | None = None
@@ -205,7 +211,7 @@ class SessionService:
 
         try:
             terminal = self.runtime.create_terminal(
-                argv,
+                with_env(argv, launch_env(workspace, session, store=self.store)),
                 cwd=cwd,
                 name=session.hc_name or self.hc_name_for(session_id, name),
                 labels={"agentctl.workspace": workspace.id, "agentctl.session": session.id},
@@ -457,9 +463,12 @@ class SessionService:
         argv = list(self.config.agents[session.agent].command if session.agent in self.config.agents else definition.command)
         if definition.session_id == "session_dir" and session.native_session_dir:
             argv.extend([definition.session_dir_flag, session.native_session_dir])
+        from agentctl.integrations.registry import launch_args_for
+
+        argv.extend(launch_args_for(self.store, workspace.id, session.agent))
         argv.extend([definition.resume_flag, native])
         new_terminal = self.runtime.create_terminal(
-            argv,
+            with_env(argv, launch_env(workspace, session, store=self.store)),
             cwd=session.cwd,
             name=self.hc_name_for(session.id, session.name),
             labels={"agentctl.workspace": workspace.id, "agentctl.session": session.id},
@@ -491,3 +500,82 @@ class SessionService:
             results.append(self.recover(workspace, session.id))
         return results
 
+
+
+# ---------------------------------------------------------------------------
+# v0.2: integration-aware launch environment
+# ---------------------------------------------------------------------------
+
+
+def with_env(argv: list[str], env: dict[str, str]) -> list[str]:
+    """Prefix `argv` with `env -u HC_TERMINAL_ID K=V ...` when there is anything to set.
+
+    `hc` starts programs with the core's environment and has no flag to inject
+    variables, so `env` in the argv is the only supported route. Values travel
+    as separate argv elements, so newlines, quotes and `$` in a session name
+    cannot be re-parsed by a shell.
+    """
+    if not env:
+        return list(argv)
+    prefix = ["env", "-u", "HC_TERMINAL_ID"]
+    for key, value in env.items():
+        if value is None:
+            continue
+        prefix.append(f"{key}={value}")
+    return [*prefix, *argv]
+
+
+def harness_config_env(agent: str, *, workspace_id: str | None, store) -> dict[str, str]:
+    """Point the agent at the config root its installed hook actually lives in.
+
+    The recorded integration is the authority, not the current shell: install
+    may have run with a different `PI_CODING_AGENT_DIR` than the leader has now,
+    and a worker launched with the wrong one silently loses its hook.
+    """
+    from agentctl.integrations.registry import ADAPTERS
+
+    if store is None or workspace_id is None:
+        return {}
+    adapter = ADAPTERS.get(agent)
+    env_name = getattr(adapter, "harness_dir_env", "") if adapter else ""
+    if not env_name:
+        return {}
+    record = store.integrations.get(workspace_id, agent, "user")
+    if record is None or not record.config_dir:
+        return {}
+    return {env_name: record.config_dir}
+
+
+def launch_env(
+    workspace: Workspace,
+    session: Session,
+    *,
+    store=None,
+    leader_epoch: int | None = None,
+    lease_token: str | None = None,
+) -> dict[str, str]:
+    """Environment a harness hook reads to identify its own session.
+
+    agentctl cannot pass environment variables through `hc run`, so callers
+    prefix the argv with `env K=V ...`. This mapping is the single definition of
+    those names, shared by creation, recovery and the hooks themselves.
+    """
+    from agentctl.paths import launcher_path
+
+    env = {
+        "AGENTCTL_WORKSPACE_ID": workspace.id,
+        "AGENTCTL_SESSION_ID": session.id,
+        "AGENTCTL_SESSION_NAME": session.name,
+        "AGENTCTL_AGENT": session.agent,
+        "AGENTCTL_HOME": str(session_state_dir().parent),
+        # Hooks invoke this exact path, so they do not depend on the worker's PATH.
+        "AGENTCTL_LAUNCHER": str(launcher_path()),
+    }
+    env.update(harness_config_env(session.agent, workspace_id=workspace.id, store=store))
+    if session.native_session_id:
+        env["AGENTCTL_NATIVE_SESSION_ID"] = session.native_session_id
+    if leader_epoch is not None:
+        env["AGENTCTL_LEADER_EPOCH"] = str(leader_epoch)
+    if lease_token:
+        env["AGENTCTL_LEASE_TOKEN"] = lease_token
+    return env

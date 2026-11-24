@@ -253,3 +253,45 @@ def _parse_json(text: str, *, quiet: bool = False) -> Any:
     if quiet:
         return None
     raise RuntimeFailure("hc returned output that is not JSON", "check `hc --version` compatibility")
+
+
+# ---------------------------------------------------------------------------
+# Event stream (hc events --json)
+#
+# Measured format, hc 0.1.18: the first line is a snapshot
+# `{"channel":null,"seq":N,"terminals":[...]}`, then one JSON-RPC notification
+# per change:
+# `{"jsonrpc":"2.0","method":"event","params":{"seq":N,"terminal":"t2",
+#   "type":"status","data":{...}}}`.
+# A heartbeat is `{"seq":N}` with no method, and a subscriber that fell behind
+# receives a fresh snapshot line instead of the events it missed.
+# ---------------------------------------------------------------------------
+
+
+def event_command(command: str, *, labels: dict[str, str] | None = None) -> list[str]:
+    """argv for the stream, kept separate so tests can assert on it."""
+    args = [command, "events", "--json"]
+    for key, value in (labels or {}).items():
+        args.extend(["--label", f"{key}={value}"])
+    return args
+
+
+def parse_event_line(line: str) -> tuple[str, dict[str, Any]] | None:
+    """Classify one stream line as ("snapshot"|"event"|"heartbeat", body)."""
+    line = line.strip()
+    if not line:
+        return None
+    try:
+        body = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    if "terminals" in body:
+        return "snapshot", body
+    params = body.get("params")
+    if body.get("method") == "event" and isinstance(params, dict):
+        return "event", params
+    if "seq" in body:
+        return "heartbeat", body
+    return None

@@ -1,5 +1,12 @@
 # agentctl
 
+<p>
+  <a href="https://github.com/Yttehs-HDX/agentctl/releases"><img alt="release" src="https://img.shields.io/badge/release-v0.3.0-blue?style=for-the-badge"></a>
+  <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue?style=for-the-badge"></a>
+  <a href="pyproject.toml"><img alt="python" src="https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge"></a>
+  <a href="https://github.com/herdrdev/herdr-core"><img alt="herdr-core" src="https://img.shields.io/badge/herdr--core-0.1.18-orange?style=for-the-badge"></a>
+</p>
+
 A thin convenience CLI over [Herdr Core](https://github.com/herdrdev/herdr-core)
 (`hc`), made for Agents to use on themselves.
 
@@ -168,6 +175,14 @@ the installed skill.
 `--cwd` must exist, resolve through symlinks to its real path, and stay inside
 the workspace root. Agent commands come from the catalog only. That is a scoping
 constraint, not an OS sandbox.
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
+
+agentctl is an independent project. It calls Herdr Core's public CLI and links
+to its repository. It is not affiliated with, endorsed by, or sponsored by the
+Herdr project, and it ships none of Herdr's code.
 
 ## Docs
 

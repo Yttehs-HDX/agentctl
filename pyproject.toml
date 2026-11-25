@@ -7,6 +7,17 @@ name = "agentctl"
 version = "0.3.0"
 description = "Thin convenience CLI over Herdr Core for Agents running Worker pools"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Environment :: Console",
+    "Topic :: System :: Systems Administration",
+]
 requires-python = ">=3.11"
 dependencies = [
     "typer>=0.12.3",

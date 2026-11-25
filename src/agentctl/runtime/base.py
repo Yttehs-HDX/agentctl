@@ -95,7 +95,15 @@ class RuntimeAdapter(ABC):
     ) -> TerminalInfo: ...
 
     @abstractmethod
-    def send_input(self, terminal: str, text: str) -> dict[str, Any]: ...
+    def send_input(
+        self,
+        terminal: str,
+        text: str,
+        *,
+        force: bool = False,
+        wait: bool = False,
+        timeout: float | None = None,
+    ) -> dict[str, Any]: ...
 
     @abstractmethod
     def send_keys(self, terminal: str, keys: list[str]) -> dict[str, Any]: ...
@@ -125,7 +133,7 @@ class RuntimeAdapter(ABC):
 
     @abstractmethod
     def wait_children(
-        self, *, parent: str | None = None, mode: str = "any", timeout: float | None = None
+        self, *, parent: str, mode: str = "any", timeout: float | None = None
     ) -> WaitOutcome: ...
 
     @abstractmethod

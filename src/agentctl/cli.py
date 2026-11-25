@@ -18,13 +18,14 @@ import typer
 
 from agentctl import JSON_SCHEMA, __version__
 from agentctl.agents.catalog import list_specs, resolve, version_verified
-from agentctl.agents.detector import installed, version as agent_version
+from agentctl.agents.detector import installed_command, version as agent_version
 from agentctl.config import default_config, load_config, save_config
 from agentctl.config.loader import dumps
 from agentctl.config.schema import Config
 from agentctl.errors import (
     AgentctlError,
     ConfigError,
+    LeaderRequired,
     SetupRequired,
     UsageError,
 )
@@ -147,9 +148,14 @@ def _open(state: State) -> Iterator[tuple[Config, Store, HerdrCoreAdapter]]:
         yield config, store, state.runtime()
 
 
-def _workspace(state: State, store: Store):
+def _workspace(state: State, store: Store, *, allow_missing: bool = False):
     """Resolve this command's workspace (flag > env > cwd > nearest parent)."""
-    return discover(store, explicit=state.workspace_arg, env=state.env_workspace()).workspace
+    return discover(
+        store,
+        explicit=state.workspace_arg,
+        env=state.env_workspace(),
+        allow_missing=allow_missing,
+    ).workspace
 
 
 # ----------------------------------------------------------------------- setup
@@ -187,8 +193,8 @@ def setup(
     rows = []
     for spec in list_specs(config):
         definition = _definition(spec.id)
-        is_installed = installed(definition) if definition else False
-        row_version = agent_version(definition) if is_installed else None
+        is_installed = bool(spec.extra.get("installed"))
+        row_version = agent_version(definition) if is_installed and definition else None
         rows.append(
             {
                 "id": spec.id,
@@ -368,7 +374,7 @@ def rebind(
     state = _state(ctx)
     with _open(state) as (config, store, runtime):
         service = WorkspaceService(store, runtime, config)
-        workspace = _workspace(state, store)
+        workspace = _workspace(state, store, allow_missing=True)
         target = canonical(new_root)
         before = workspace.root_path
         moved = service.rebind(workspace, target)
@@ -484,6 +490,8 @@ def _print_prune(result) -> None:
             f"pruned {result.sessions} sessions, "
             f"removed {result.directories} directories, freed {_format_bytes(result.bytes_freed)}"
         )
+    for note in result.notes:
+        typer.echo(f"note: {note}")
     for error in result.errors:
         typer.echo(f"kept: {error}")
 
@@ -682,23 +690,25 @@ def wait(
         Optional[str], typer.Argument(help="Session name or id; omit with --all/--any.")
     ] = None,
     all_workers: Annotated[
-        bool, typer.Option("--all", help="Wait until no Worker is working (hc wait --children all).")
+        bool, typer.Option("--all", help="Wait until none of the bound Leader's children is working.")
     ] = False,
     any_worker: Annotated[
-        bool, typer.Option("--any", help="Return on the next Worker's news (hc wait --children any).")
+        bool, typer.Option("--any", help="Wait for news from the bound Leader's children.")
     ] = False,
     timeout: Annotated[float, typer.Option("--timeout", help="Seconds before a check-in (not failure).")] = 180.0,
 ) -> None:
     """Wait for a Worker's turn, or for the Workers' next news.
 
-    `wait NAME` waits for one session. `wait --any` / `wait --all` wrap Herdr's
-    own children wait, so completion is decided by Herdr's turn counter, never by
-    agentctl reading a screen or counting reports.
+    `wait NAME` waits for one session. `--any` and `--all` only wait on the
+    current Leader's Herdr children. They do not include parentless Workers or
+    Workers that still belong to a previous Leader.
     """
     state = _state(ctx)
     if all_workers and any_worker:
         raise UsageError("--all and --any are alternatives", "pass one of them")
     children_mode = "all" if all_workers else ("any" if any_worker else None)
+    if children_mode is not None and session is not None:
+        raise UsageError("pass a session name or --all/--any, not both")
     if children_mode is None and session is None:
         raise UsageError(
             "wait needs a session, or --all/--any",
@@ -706,16 +716,19 @@ def wait(
         )
     with _open(state) as (config, store, runtime):
         workspace = _workspace(state, store)
-        service = SessionService(store, runtime, config)
-        messaging = MessagingService(runtime, service.lifecycle)
-
         if children_mode is not None:
-            leader = store.leaders.get(workspace.id)
-            outcome = messaging.wait_children(
-                leader=leader, mode=children_mode, timeout=timeout
-            )
+            leader = LeaderService(store, runtime).status(workspace)
+            if not leader.live or leader.terminal is None:
+                raise LeaderRequired(
+                    "waiting for children requires a live Leader terminal",
+                    "run `agentctl leader attach` from the Leader's terminal or use `agentctl wait NAME`",
+                )
+            parent = leader.terminal.address
+            outcome = runtime.wait_children(parent=parent, mode=children_mode, timeout=timeout)
             payload = {
                 "mode": f"children:{children_mode}",
+                "scope": "leader_children",
+                "parent": parent,
                 "ended": outcome.ended,
                 "reason": outcome.reason,
                 "status": outcome.status,
@@ -727,6 +740,8 @@ def wait(
             state.emit(payload, lambda: _print_children_wait(payload))
             return
 
+        service = SessionService(store, runtime, config)
+        messaging = MessagingService(runtime, service.lifecycle)
         target = service.get(workspace, session)
         outcome = messaging.wait(target, timeout=timeout)
         service.lifecycle.refresh(target)
@@ -753,12 +768,14 @@ def _print_wait(payload: dict[str, Any]) -> None:
 
 
 def _print_children_wait(payload: dict[str, Any]) -> None:
+    label = f"Leader {payload['parent']}'s children"
     if payload["check_in"]:
-        typer.echo(f"still working ({payload['reason']}, {len(payload['children'])} children)")
+        typer.echo(f"{label}: check-in ({payload['reason']}, {len(payload['children'])} children)")
         return
     if not payload["children"]:
-        typer.echo(f"nothing to wait for ({payload['reason']})")
+        typer.echo(f"{label}: no children returned (not a workspace-wide result)")
         return
+    typer.echo(f"{label}:")
     for child in payload["children"]:
         typer.echo(
             f"{child.get('terminal')}: {child.get('status') or '-'} "
@@ -878,8 +895,8 @@ def agents_list(ctx: typer.Context) -> None:
     rows = []
     for spec in list_specs(config):
         definition = _definition(spec.id)
-        is_installed = installed(definition) if definition else False
-        row_version = agent_version(definition) if is_installed else None
+        is_installed = bool(spec.extra.get("installed"))
+        row_version = agent_version(definition) if is_installed and definition else None
         rows.append(
             {
                 "id": spec.id,
@@ -926,13 +943,14 @@ def agents_inspect(
     config = _config_or_default()
     definition = _definition(agent_id)
     entry = config.agents.get(agent_id)
+    command = entry.command if entry else (definition.command if definition else None)
     installed_version = agent_version(definition) if definition else None
     payload = {
         "id": agent_id,
         "configured": entry is not None,
         "enabled": entry.enabled if entry else None,
-        "command": entry.command if entry else (definition.command if definition else None),
-        "installed": installed(definition) if definition else False,
+        "command": command,
+        "installed": installed_command(command) if command else False,
         "version": installed_version,
         "version_verified": version_verified(definition, installed_version) if definition else None,
         "integration": bool(definition and definition.integration),

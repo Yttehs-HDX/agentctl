@@ -76,8 +76,11 @@ agentctl --workspace OLD rebind NEW
 
 Explicitly moves the workspace identity to another directory. The workspace id
 and leader id are unchanged, sessions follow, and the old root stops resolving.
-Refuses a target that belongs to another workspace. Directory moves are never
-detected automatically.
+You can run this command after `mv OLD NEW`, so `OLD` does not need to exist.
+`NEW` must exist. Session paths inside the workspace move to `NEW`; Git roots
+outside the workspace stay unchanged. Existing Git worktrees are repaired before
+the registry changes. Refuses a target that belongs to another workspace.
+Directory moves are never detected automatically.
 
 ## info
 
@@ -120,6 +123,10 @@ agentctl --workspace PATH create --name NAME --cwd DIR
   `create` returns as soon as the terminal exists. The `ready` field says
   whether the agent has reported; `send` remains the hard delivery gate.
 
+A failed `create` removes the row and any worktree or session directory it made.
+If one of those cannot be removed, the error hint names the leftover path; no
+later command could find it.
+
 Prints the session id, agent, cwd, mode, terminal address and readiness.
 
 ## delete
@@ -139,21 +146,24 @@ agentctl --workspace PATH prune [--dry-run]
 ```
 
 Reclaims state owned by the registry for this workspace's soft-deleted
-sessions: it removes each `native_session_dir` that is a direct child of
-`session_state_dir()` (sizes are reported before removal), then hard-deletes
-the row. A directory anywhere else is reported and kept, as is a row
-whose directory could not be removed. Worktrees and git branches are never
-touched; agent-global native stores are out of scope. `--dry-run` reports what
-would happen without deleting anything. Human output:
+sessions. The deletion target is always `session_state_dir()/<session id>`,
+never the recorded `native_session_dir`: a corrupted or tampered row can only
+point at its own directory, and an id that would leave the state dir, or a
+symlinked entry there, is reported and refused. The recorded path is compared,
+and a disagreement is printed as a `note`. Sizes are reported before removal,
+then the row is hard-deleted. Worktrees and git branches are never touched;
+agent-global native stores are out of scope. `--dry-run` reports what would
+happen without deleting anything. Human output:
 
 ```text
 would prune 2 sessions, 2 directories, 4.0 KiB
+note: session 'x': recorded path /elsewhere ignored; removing /state/sess_x
 pruned 2 sessions, removed 2 directories, freed 4.0 KiB
-kept: session 'x': refusing to remove /elsewhere (outside ...)
+kept: session 'y': refusing unsafe session id '../escape'
 ```
 
 Exits 1 when any row was kept, including in `--dry-run`; the JSON payload
-still lists every `errors` entry.
+still lists every `errors` entry, plus the `notes` it ignored.
 
 ## leader
 
@@ -167,9 +177,11 @@ agentctl leader status
   `$HC_TERMINAL_ID`, which is how a Leader inside Herdr needs no arguments. An
   outside Leader passes no terminal and is recorded as such.
 - A second `attach` from a different terminal is refused while the bound one is
-  live; `--takeover` replaces it when you know it is gone.
-- A terminal labelled `agentctl.role=worker`, or belonging to another workspace,
-  is refused: a Worker never becomes the Leader by accident.
+  live; `--takeover` replaces it when you know it is gone. A takeover is
+  last-writer-wins: it does not unlabel the previous terminal, so `info` lists
+  that terminal under `orphans` until it exits or is removed.
+- A terminal with a Worker role or session label cannot become the Leader.
+  A terminal belonging to another workspace is also refused.
 - `status` reports the binding and whether Herdr still calls that terminal live.
   There is no expiry; Herdr's terminal state is the truth.
 - `detach` forgets the binding. The terminal keeps running.
@@ -183,10 +195,12 @@ agentctl wait --all [--timeout S]
 ```
 
 `wait NAME` wraps `hc wait` for one session: it returns when the agent stops
-working or exits. `--any` and `--all` wrap `hc wait --children any|all`, using
-the Leader's terminal as the parent, so an outside Leader sees the same children
-a Leader inside Herdr would. `reason: "status"` is a finished turn; `timeout` is
-a check-in, never a failure.
+working or exits. `--any` and `--all` require a live Leader terminal and wait
+only on its Herdr children. Workers of a previous Leader and parentless
+Workers are not included. Use `wait NAME` for those Workers. Group wait JSON
+includes `scope: "leader_children"` and the `parent` address. An empty
+`children` list is not a workspace-wide result. `reason: "status"` is a
+finished turn. `reason: "timeout"` is a check-in, not an error.
 
 ## send
 

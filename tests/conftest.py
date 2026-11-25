@@ -20,6 +20,8 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home.mkdir()
     monkeypatch.setenv("AGENTCTL_HOME", str(home))
     monkeypatch.delenv("AGENTCTL_JSON", raising=False)
+    monkeypatch.delenv("AGENTCTL_WORKSPACE", raising=False)
+    monkeypatch.delenv("HC_TERMINAL_ID", raising=False)
     return home
 
 
@@ -59,7 +61,7 @@ def emit(obj, code=0):
 
 def find(term):
     for name, body in list(state["terminals"].items()):
-        if name == term or body["address"] == term:
+        if name == term or body["address"] == term or body["name"] == term:
             return body
     return None
 
@@ -175,11 +177,8 @@ if cmd == "read":
 if cmd == "wait":
     if "--children" in args:
         mode = args[args.index("--children") + 1]
-        parent = None
-        for i, a in enumerate(args):
-            if not a.startswith("-") and i > 0 and args[i - 1] != "--children" and a != mode:
-                if a != "wait":
-                    parent = a
+        parent_args = args[args.index("--children") + 2:]
+        parent = parent_args[0] if parent_args and not parent_args[0].startswith("-") else None
         children = {{}}
         for body in state["terminals"].values():
             if parent is None or body.get("parent") == parent:

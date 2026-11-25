@@ -9,6 +9,7 @@ from typer.testing import CliRunner
 
 from agentctl.cli import app
 from agentctl.config import default_config, save_config
+from agentctl.storage import Store, open_database
 import agentctl.agents.detector as detector
 
 runner = CliRunner()
@@ -16,6 +17,7 @@ runner = CliRunner()
 
 def _configure(monkeypatch, default_agent: str = "omp") -> None:
     monkeypatch.setattr(detector, "installed", lambda d: d.id == "omp")
+    monkeypatch.setattr(detector, "installed_command", lambda command: command[0] == "omp")
     config = default_config()
     config.defaults.agent = default_agent
     save_config(config)
@@ -96,3 +98,38 @@ def test_workspaces_do_not_share_sessions(workspace: Path, tmp_path: Path, fake_
 
     status = _run("--workspace", str(other), "status", "mine")
     assert status.exit_code != 0
+
+
+def test_rebind_after_directory_move_updates_existing_sessions(
+    workspace: Path, tmp_path: Path, fake_hc: Path, monkeypatch
+) -> None:
+    _configure(monkeypatch)
+    _run("--workspace", str(workspace), "init")
+    created = _run(
+        "--workspace",
+        str(workspace),
+        "--json",
+        "create",
+        "--name",
+        "moved-worker",
+        "--cwd",
+        str(workspace / "backend"),
+    )
+    assert created.exit_code == 0, created.output
+    session_id = json.loads(created.output)["session"]["id"]
+    old_root = str(workspace)
+    moved = tmp_path / "moved"
+    workspace.rename(moved)
+
+    result = _run("--workspace", old_root, "--json", "rebind", str(moved))
+
+    assert result.exit_code == 0, (result.output, result.exception)
+    with open_database() as conn:
+        store = Store(conn)
+        rebound = store.workspaces.find_by_root(str(moved))
+        assert rebound is not None
+        session = store.sessions.find_by_id(session_id)
+        assert session.cwd == str(moved / "backend")
+    listed = _run("--workspace", str(moved), "--json", "list", "--no-refresh")
+    assert listed.exit_code == 0, listed.output
+    assert json.loads(listed.output)["sessions"][0]["cwd"] == str(moved / "backend")

@@ -33,6 +33,7 @@ from dataclasses import dataclass
 from agentctl.clock import now
 from agentctl.errors import LeaderRequired, UsageError
 from agentctl.runtime.base import RuntimeAdapter, TerminalInfo
+from agentctl.storage.database import transaction
 from agentctl.storage.models import LeaderBinding, Workspace
 
 #: Label marking a terminal as a Worker, so it can never be adopted as Leader.
@@ -89,19 +90,28 @@ class LeaderService:
         return self.store.leaders.get(workspace.id)
 
     def _terminal_for(self, binding: LeaderBinding | None) -> TerminalInfo | None:
-        if binding is None:
+        if binding is None or binding.terminal is None:
             return None
-        if binding.terminal:
-            terminal = self.runtime.find_terminal(binding.terminal)
-            if terminal is not None and terminal.is_local:
-                return terminal
-        # The address may be stale after a core restart; labels survive it.
-        for terminal in self.runtime.list_terminals(
-            labels={"agentctl.workspace": workspace_label(binding)}, include_finished=False
+        terminal = self.runtime.find_terminal(binding.terminal)
+        if (
+            terminal is not None
+            and terminal.is_local
+            and terminal.labels.get("agentctl.workspace") == binding.workspace_id
+            and terminal.labels.get(ROLE_LABEL) == LEADER_ROLE
         ):
-            if terminal.is_local and terminal.labels.get(ROLE_LABEL) == LEADER_ROLE:
-                return terminal
+            return terminal
         return None
+
+    def _live_bound_terminal(self, binding: LeaderBinding | None) -> TerminalInfo | None:
+        """The bound terminal, only when Herdr reports it live.
+
+        A finished terminal frees the binding: the address may still resolve,
+        but nothing is running there, so any Leader may attach.
+        """
+        terminal = self._terminal_for(binding)
+        if terminal is None or not terminal.live:
+            return None
+        return terminal
 
     def status(self, workspace: Workspace) -> LeaderStatus:
         binding = self.current(workspace)
@@ -138,22 +148,33 @@ class LeaderService:
         inside Herdr identifies itself without arguments. An outside Leader
         passes no terminal and gets a binding with no address; Herdr then reports
         it as not live, which is accurate.
+
+        The staleness decision, the row write and the role label all happen
+        inside one `BEGIN IMMEDIATE` transaction. That is what keeps a binding
+        from ever being visible without its label: a competitor that read the
+        row as stale must first wait for the writer to commit, and then sees the
+        label and refuses. The cost is that the `hc` calls run under the write
+        lock, for one short attach.
         """
         address = terminal or os.environ.get("HC_TERMINAL_ID") or None
         terminal_info: TerminalInfo | None = None
         if address:
             terminal_info = self.runtime.find_terminal(address)
-            if terminal_info is None:
+            if terminal_info is None or not terminal_info.is_local or not terminal_info.live:
                 raise UsageError(
-                    f"terminal {address} does not exist",
+                    f"terminal {address} is not a live local terminal",
                     "run this from inside the Leader's Herdr terminal, or pass --terminal",
                 )
-            if terminal_info.labels.get(ROLE_LABEL) == WORKER_ROLE:
+            if (
+                terminal_info.labels.get(ROLE_LABEL) == WORKER_ROLE
+                or "agentctl.session" in terminal_info.labels
+            ):
                 raise LeaderRequired(
                     f"terminal {address} is a Worker, not a Leader",
                     "a Worker never becomes the Leader implicitly; run `agentctl leader attach` "
                     "from the Leader's own terminal",
                 )
+            address = terminal_info.address
             owner = terminal_info.labels.get("agentctl.workspace")
             if owner and owner != workspace.id:
                 raise UsageError(
@@ -161,34 +182,46 @@ class LeaderService:
                     "attach from a terminal in this workspace, or pass --terminal",
                 )
 
-        existing = self.current(workspace)
-        if existing is not None and not take_over:
-            status = self.status(workspace)
-            if status.live and existing.terminal != address:
-                raise LeaderRequired(
-                    f"workspace {workspace.id} is already led from terminal "
-                    f"{existing.terminal} ({existing.native_session_id or 'no session id'})",
-                    "reuse that terminal, or run `agentctl leader attach --takeover` "
-                    "if it is really gone",
-                )
-
         stamp = now()
-        binding = LeaderBinding(
-            workspace_id=workspace.id,
-            leader_id=workspace.leader_id,
-            terminal=address,
-            native_session_id=native_session_id or existing_native(existing),
-            attached_at=stamp,
-            updated_at=stamp,
-        )
-        self.store.leaders.upsert(binding)
-        if terminal_info is not None:
-            # Label the Leader's own terminal so it is discoverable, and so a
-            # Worker's terminal can never be mistaken for it.
-            self.runtime.label(
-                terminal_info.address,
-                {"agentctl.workspace": workspace.id, ROLE_LABEL: LEADER_ROLE},
+        with transaction(self.store.conn):
+            existing = self.store.leaders.get(workspace.id)
+            if existing is not None and not take_over:
+                bound = self._live_bound_terminal(existing)
+                if bound is not None and bound.address != address:
+                    raise LeaderRequired(
+                        f"workspace {workspace.id} is already led from terminal "
+                        f"{existing.terminal} ({existing.native_session_id or 'no session id'})",
+                        "reuse that terminal, or run `agentctl leader attach --takeover` "
+                        "if it is really gone",
+                    )
+            binding = LeaderBinding(
+                workspace_id=workspace.id,
+                leader_id=workspace.leader_id,
+                terminal=address,
+                native_session_id=native_session_id or existing_native(existing),
+                attached_at=stamp,
+                updated_at=stamp,
             )
+            if existing is None:
+                won = self.store.leaders.insert_if_absent(binding)
+            else:
+                won = self.store.leaders.update_if_unchanged(
+                    binding,
+                    expected_terminal=existing.terminal,
+                    expected_native=existing.native_session_id,
+                )
+            if not won:
+                raise LeaderRequired(
+                    "another Leader attached while this one was validating",
+                    "check `agentctl leader status`; attach again only if that terminal is gone",
+                )
+            if terminal_info is not None:
+                # Inside the transaction: a loser must not claim the terminal,
+                # and a winner must never be visible before its label.
+                self.runtime.label(
+                    terminal_info.address,
+                    {"agentctl.workspace": workspace.id, ROLE_LABEL: LEADER_ROLE},
+                )
         self.store.workspaces.touch(workspace.id, stamp)
         return binding
 
@@ -203,14 +236,6 @@ class LeaderService:
 def existing_native(binding: LeaderBinding | None) -> str | None:
     return binding.native_session_id if binding else None
 
-
-def workspace_label(binding: LeaderBinding) -> str:
-    """The workspace id a binding's terminal should carry.
-
-    Stored separately from the binding because the lookup above needs it before
-    it has a workspace row in hand.
-    """
-    return getattr(binding, "workspace_id", "")
 
 
 __all__ = [

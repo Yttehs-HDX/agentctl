@@ -1,7 +1,7 @@
 """SQLite persistence: connection, schema and migrations.
 
 One database per user (see agentctl.paths). WAL keeps readers from blocking a
-writer; every state transition runs in an explicit transaction.
+writer. Schema changes and version updates share an explicit transaction.
 
 Schema history
 --------------
@@ -25,59 +25,63 @@ from agentctl.errors import ConfigError
 
 SCHEMA_VERSION = 4
 
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS meta (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS workspaces (
-    id TEXT PRIMARY KEY,
-    root_path TEXT NOT NULL UNIQUE,
-    leader_id TEXT NOT NULL UNIQUE,
-    default_agent TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL,
-    name TEXT NOT NULL,
-    agent TEXT NOT NULL,
-    cwd TEXT NOT NULL,
-    mode TEXT NOT NULL,
-    hc_terminal_id TEXT,
-    hc_name TEXT,
-    native_session_id TEXT,
-    native_session_dir TEXT,
-    worktree_path TEXT,
-    worktree_branch TEXT,
-    git_root TEXT,
-    runtime_started_at TEXT,
-    status TEXT NOT NULL,
-    last_error TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    deleted_at TEXT,
-    FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS sessions_one_live_name
-    ON sessions(workspace_id, name) WHERE deleted_at IS NULL;
-
--- One row per workspace: the lease is a single-writer row, so SQLite's own
--- transaction isolation arbitrates concurrent claims without a lock file.
-CREATE TABLE IF NOT EXISTS leader_bindings (
-    workspace_id TEXT PRIMARY KEY,
-    leader_id TEXT NOT NULL,
-    terminal TEXT,
-    native_session_id TEXT,
-    attached_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
-);
-"""
+SCHEMA = (
+    """
+    CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS workspaces (
+        id TEXT PRIMARY KEY,
+        root_path TEXT NOT NULL UNIQUE,
+        leader_id TEXT NOT NULL UNIQUE,
+        default_agent TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        cwd TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        hc_terminal_id TEXT,
+        hc_name TEXT,
+        native_session_id TEXT,
+        native_session_dir TEXT,
+        worktree_path TEXT,
+        worktree_branch TEXT,
+        git_root TEXT,
+        runtime_started_at TEXT,
+        status TEXT NOT NULL,
+        last_error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        deleted_at TEXT,
+        FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+    );
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS sessions_one_live_name
+        ON sessions(workspace_id, name) WHERE deleted_at IS NULL;
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS leader_bindings (
+        workspace_id TEXT PRIMARY KEY,
+        leader_id TEXT NOT NULL,
+        terminal TEXT,
+        native_session_id TEXT,
+        attached_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        FOREIGN KEY(workspace_id) REFERENCES workspaces(id)
+    );
+    """,
+)
 
 
 def connect(path: Path | str) -> sqlite3.Connection:
@@ -85,42 +89,43 @@ def connect(path: Path | str) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(path), timeout=10.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=10000")
     return conn
 
 
 def initialize(conn: sqlite3.Connection) -> None:
-    # executescript() commits implicitly, so the DDL runs outside a transaction
-    # and only the version row is transactional.
-    conn.executescript(SCHEMA)
-    _migrate(conn)
     with transaction(conn):
-        row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-        if row is None:
-            conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', ?)", (str(SCHEMA_VERSION),))
-        else:
-            stored = int(row["value"])
-            if stored > SCHEMA_VERSION:
-                raise ConfigError(
-                    f"registry schema version {stored} is newer than this agentctl supports "
-                    f"({SCHEMA_VERSION})",
-                    "upgrade agentctl, or back up and remove registry.db and run `agentctl setup`",
-                )
-            if stored != SCHEMA_VERSION:
-                conn.execute(
-                    "UPDATE meta SET value = ? WHERE key='schema_version'", (str(SCHEMA_VERSION),)
-                )
+        has_meta = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+        ).fetchone()
+        row = (
+            conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            if has_meta else None
+        )
+        stored = int(row["value"]) if row else 0
+        if stored > SCHEMA_VERSION:
+            raise ConfigError(
+                f"registry schema version {stored} is newer than this agentctl supports "
+                f"({SCHEMA_VERSION})",
+                "upgrade agentctl, or back up and remove registry.db and run `agentctl setup`",
+            )
+
+        for statement in SCHEMA:
+            conn.execute(statement)
+        _migrate(conn)
+        if stored != SCHEMA_VERSION:
+            conn.execute(
+                "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (str(SCHEMA_VERSION),),
+            )
 
 
-#: Tables v0.2 introduced and v0.3 removed. Dropping them is the upgrade: their
-#: content duplicated Herdr state, so nothing in them is worth migrating.
 _OBSOLETE_TABLES = (
     "messages",
-    "events",
     "inbox",
+    "events",
     "outbox",
     "consumer_offsets",
     "integrations",

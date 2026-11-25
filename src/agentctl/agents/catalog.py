@@ -34,7 +34,7 @@ def list_specs(config: Config, *, include_unconfigured: bool = False) -> list[Ag
                 integration=bool(definition and definition.integration),
                 notes=definition.notes if definition else "user-defined agent; capabilities unknown",
                 extra={
-                    "installed": detector.installed(definition) if definition else False,
+                    "installed": detector.installed_command(command) if command else False,
                     "known": definition is not None,
                 },
             )
@@ -61,12 +61,12 @@ def resolve(config: Config, agent_id: str) -> AgentSpec:
             f"agent {agent_id!r} is configured but has no verified Herdr Core integration",
             "only catalog agents from agentctl's definitions can be launched",
         )
-    if not detector.installed(definition):
-        raise AgentNotInstalled(
-            f"agent {agent_id!r} is configured but `{definition.command[0]}` is not on PATH",
-            "install the agent or disable it in config.toml",
-        )
     command = list(entry.command) if entry else list(definition.command)
+    if not detector.installed_command(command):
+        raise AgentNotInstalled(
+            f"agent {agent_id!r} is configured but `{command[0]}` is not on PATH",
+            "install the agent, fix its command in config.toml, or disable it",
+        )
     return AgentSpec(
         id=definition.id,
         command=command,

@@ -26,6 +26,7 @@ from tests.conftest import calls, read_state
 @pytest.fixture()
 def setup(workspace: Path, fake_hc: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(detector, "installed", lambda definition: True)
+    monkeypatch.setattr(detector, "installed_command", lambda command: True)
     conn = open_connection()
     store = Store(conn)
     ws, _ = WorkspaceResolver(store).get_or_create(str(workspace))
@@ -127,18 +128,23 @@ def test_key_names_never_start_with_a_dash(setup) -> None:
         messaging.keys(session, ["--help"])
 
 
-def test_children_wait_uses_the_leaders_terminal(setup) -> None:
-    messaging, _service, store, ws, state_file, _session = setup
-    from agentctl.leader.service import LeaderService
+def test_reused_local_address_does_not_expose_an_unrelated_terminal(setup) -> None:
+    messaging, _service, _store, _ws, state_file, session = setup
+    state = read_state(state_file)
+    next(iter(state["terminals"].values()))["labels"] = {}
+    state_file.write_text(json.dumps(state))
 
-    LeaderService(store, messaging.runtime).attach(ws, take_over=True)  # outside-Herdr Leader
-    outcome = messaging.wait_children(leader=store.leaders.get(ws.id), mode="all", timeout=5)
-    assert outcome.reason == "children"
-    argv = calls(state_file)[-1]
-    assert argv[argv.index("--children") + 1] == "all"
+    with pytest.raises(RuntimeFailure, match="no runtime terminal"):
+        messaging.read(session)
 
 
-def test_children_wait_accepts_no_leader(setup) -> None:
-    messaging, _service, _store, _ws, _state, _session = setup
-    outcome = messaging.wait_children(leader=None, mode="any", timeout=5)
-    assert outcome.reason == "children"
+def test_delete_at_a_reused_address_keeps_the_registered_worker(setup) -> None:
+    _messaging, service, _store, ws, state_file, session = setup
+    state = read_state(state_file)
+    next(iter(state["terminals"].values()))["labels"] = {}
+    state_file.write_text(json.dumps(state))
+
+    with pytest.raises(RuntimeFailure, match="belongs to a different terminal"):
+        service.delete(ws, session.name)
+    assert service.get(ws, session.name).id == session.id
+    assert next(iter(read_state(state_file)["terminals"].values()))["state"] == "live"

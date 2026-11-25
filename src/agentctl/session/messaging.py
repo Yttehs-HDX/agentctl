@@ -121,18 +121,6 @@ class MessagingService:
             wait=turn_result,
         )
 
-    def wait_children(
-        self, *, leader, mode: str = "any", timeout: float | None = None
-    ) -> WaitOutcome:
-        """Wait on this workspace's Workers through Herdr's children wait.
-
-        `parent` is the Leader's terminal when one is bound, so an outside Leader
-        waits on the same children a Leader inside Herdr would. Herdr decides when
-        a child is done, from its own turn counter.
-        """
-        parent = leader.terminal if leader is not None else None
-        return self.runtime.wait_children(parent=parent, mode=mode, timeout=timeout)
-
     def keys(self, session: Session, keys: list[str]) -> KeyReport:
         if not keys:
             raise UsageError("at least one key name is required")

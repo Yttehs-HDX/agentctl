@@ -78,7 +78,9 @@ token, no epoch, no expiry.
 
 - `leader attach` records the terminal (`$HC_TERMINAL_ID` by default), labels it
   `agentctl.role=leader`, and refuses a terminal already bound to another
-  workspace, or one carrying `agentctl.role=worker`.
+  workspace, or one carrying `agentctl.role=worker`. The staleness check, the
+  row write and the label share one `BEGIN IMMEDIATE` transaction, so a binding
+  is never visible without its label and two attaches cannot both win.
 - `leader status` asks Herdr whether that terminal is live. A finished terminal
   means the binding is stale, so any Leader may attach; nothing has to expire.
 - `leader detach` forgets the row. The terminal keeps running.
@@ -113,9 +115,12 @@ survival.
 
 ```text
 agentctl wait NAME      → hc wait <terminal>          one session's turn
-agentctl wait --any     → hc wait --children any      next news from any Worker
-agentctl wait --all     → hc wait --children all      until no Worker is working
+agentctl wait --any     → hc wait --children any      news from the bound Leader's children
+agentctl wait --all     → hc wait --children all      until those children stop working
 ```
+
+Group waits require a live bound Leader. Taking over does not reparent the
+old Leader's Workers. Wait for them by name.
 
 `WaitOutcome.turn_ended` is `reason == "status"`: Herdr saw the child leave
 `working`. That is the agent-agnostic completion signal, verified on 0.1.18 with
@@ -151,7 +156,9 @@ leader_bindings(workspace_id PK FK, leader_id, terminal, native_session_id,
   turn counts; they are queried, never mirrored.
 - `workspaces.id` is `ws_<uuid4hex>` and `leader_id` is `leader_<uuid4hex>`.
   Neither is derived from the path, so a moved directory keeps its identity
-  until `rebind` says otherwise.
+  until `rebind` says otherwise. `rebind` rewrites every stored path under the
+  old root (`cwd`, `worktree_path`, `git_root`, `native_session_dir`) in one
+  transaction, then repairs moved worktrees with `git worktree repair <path>`.
 - `sessions.id` is `sess_<uuid4hex>`, never equal to a terminal address.
 - `deleted_at` is a soft delete: history and native ids stay readable.
 - Schema version 4 drops the v0.2 tables (`messages`, `events`, `inbox`,

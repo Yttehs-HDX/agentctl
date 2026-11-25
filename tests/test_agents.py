@@ -21,10 +21,26 @@ def test_every_configured_default_agent_has_a_definition() -> None:
 def test_list_specs_reports_installed_state(monkeypatch: pytest.MonkeyPatch) -> None:
     import agentctl.agents.detector as detector
 
-    monkeypatch.setattr(detector, "installed", lambda d: d.id == "omp")
+    monkeypatch.setattr(detector, "installed_command", lambda command: command[0] == "omp")
     specs = {spec.id: spec for spec in list_specs(default_config())}
     assert specs["omp"].extra["installed"] is True
     assert specs["codex"].extra["installed"] is False
+
+
+def test_configured_command_is_the_one_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A user override is what runs, so it is what must exist on PATH."""
+    import shutil as shutil_module
+
+    config = default_config()
+    config.agents["claude"].command = ["/bin/echo"]
+    real_which = shutil_module.which
+    monkeypatch.setattr(
+        shutil_module,
+        "which",
+        lambda name, *args, **kwargs: None if name == "claude" else real_which(name, *args, **kwargs),
+    )
+    spec = resolve(config, "claude")
+    assert spec.command == ["/bin/echo"]
 
 
 def test_unknown_agent_is_rejected() -> None:
@@ -43,6 +59,7 @@ def test_missing_binary_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     import agentctl.agents.detector as detector
 
     monkeypatch.setattr(detector, "installed", lambda d: False)
+    monkeypatch.setattr(detector, "installed_command", lambda command: False)
     with pytest.raises(AgentNotInstalled):
         resolve(default_config(), "pi")
 
@@ -76,6 +93,7 @@ def test_agent_with_no_definition_cannot_be_resolved(monkeypatch: pytest.MonkeyP
     import agentctl.agents.detector as detector
 
     monkeypatch.setattr(detector, "installed", lambda d: True)
+    monkeypatch.setattr(detector, "installed_command", lambda command: True)
     config = default_config()
     from agentctl.config.schema import AgentEntry
 

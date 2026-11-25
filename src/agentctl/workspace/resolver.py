@@ -20,16 +20,16 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def canonical(path: str | os.PathLike[str]) -> str:
-    """Absolute, symlink-resolved path. The caller must exist."""
+def canonical(path: str | os.PathLike[str], *, allow_missing: bool = False) -> str:
+    """Return an absolute, symlink-resolved directory path."""
     raw = Path(path).expanduser()
     try:
-        resolved = Path(os.path.realpath(raw, strict=True))
+        resolved = Path(os.path.realpath(raw, strict=not allow_missing))
     except FileNotFoundError as exc:
         raise InvalidPath(f"{raw} does not exist") from exc
     except OSError as exc:
         raise InvalidPath(f"{raw} cannot be resolved: {exc}") from exc
-    if not resolved.is_dir():
+    if not resolved.is_dir() and (not allow_missing or resolved.exists()):
         raise InvalidPath(f"{resolved} is not a directory")
     return str(resolved)
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,12 +22,14 @@ from agentctl.agents.definitions import AGENT_DEFINITIONS
 from agentctl.config.schema import Config
 from agentctl.errors import (
     AgentNotConfigured,
+    AgentctlError,
     RuntimeFailure,
     SessionNameConflict,
     SessionNotFound,
     UsageError,
 )
 from agentctl.paths import session_state_dir
+from agentctl.leader.service import ROLE_LABEL, WORKER_ROLE, LeaderService
 from agentctl.runtime.base import RuntimeAdapter, TerminalInfo
 from agentctl.session.lifecycle import LifecycleManager
 from agentctl.session.worktree import create_worktree, ensure_git_repo, remove_worktree
@@ -45,6 +48,12 @@ def is_hc_address_shaped(name: str) -> bool:
     the address and the name share one namespace in `hc get`.
     """
     return bool(re.fullmatch(r"t[0-9][0-9a-z]*", name))
+
+
+def _with_leftovers(hint: str, leftovers: list[str]) -> str:
+    if not leftovers:
+        return hint
+    return f"{hint}; cleanup incomplete: {'; '.join(leftovers)}"
 
 
 def _directory_size(root: Path) -> int:
@@ -82,6 +91,7 @@ class PruneResult:
     directories: int = 0
     bytes_freed: int = 0
     errors: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
     dry_run: bool = False
 
     def to_dict(self) -> dict[str, object]:
@@ -90,6 +100,7 @@ class PruneResult:
             "directories": self.directories,
             "bytes_freed": self.bytes_freed,
             "errors": list(self.errors),
+            "notes": list(self.notes),
             "dry_run": self.dry_run,
         }
 
@@ -139,6 +150,10 @@ class SessionService:
 
     # ------------------------------------------------------------------ create
 
+    def _leader_terminal(self, workspace: Workspace) -> str | None:
+        status = LeaderService(self.store, self.runtime).status(workspace)
+        return status.terminal.address if status.terminal and status.live else None
+
     def create(
         self,
         workspace: Workspace,
@@ -179,7 +194,6 @@ class SessionService:
             argv.extend([definition.session_id_flag, native_id])
         elif definition.session_id == "session_dir" and definition.session_dir_flag:
             native_dir = str(session_state_dir() / session_id)
-            Path(native_dir).mkdir(parents=True, exist_ok=True)
             argv.extend([definition.session_dir_flag, native_dir])
 
         worktree_path: str | None = None
@@ -218,22 +232,50 @@ class SessionService:
             updated_at=stamp,
             deleted_at=None,
         )
-        self.store.sessions.insert(session)
+        try:
+            self.store.sessions.insert(session)
+        except sqlite3.IntegrityError as exc:
+            # The unique index is the arbiter. The pre-check above only exists
+            # to give a clean message; two creates can pass it together.
+            leftovers = self._remove_created_resources(
+                worktree_path=worktree_path,
+                worktree_branch=worktree_branch,
+                git_root=git_root,
+                native_dir=native_dir,
+            )
+            raise SessionNameConflict(
+                f"session {name!r} already exists in workspace {workspace.id}",
+                _with_leftovers(
+                    "choose another --name, or delete the existing session first", leftovers
+                ),
+            ) from exc
 
         try:
+            if native_dir:
+                Path(native_dir).mkdir(parents=True, exist_ok=True)
             terminal = self.runtime.create_terminal(
                 with_env(argv, launch_env(workspace, session)),
                 cwd=cwd,
                 name=session.hc_name or self.hc_name_for(session_id, name),
                 labels=worker_labels(workspace, session),
-                parent=leader_terminal(self.store, workspace),
+                parent=self._leader_terminal(workspace),
                 outlive_parent=True,
                 first_task=request.task,
             )
-        except BaseException:
+        except BaseException as exc:
             self.store.sessions.hard_delete(session.id)
-            if worktree_path and git_root:
-                remove_worktree(repo_root=git_root, path=worktree_path, branch=worktree_branch)
+            leftovers = self._remove_created_resources(
+                worktree_path=worktree_path,
+                worktree_branch=worktree_branch,
+                git_root=git_root,
+                native_dir=native_dir,
+            )
+            if leftovers:
+                note = "cleanup incomplete: " + "; ".join(leftovers)
+                if isinstance(exc, AgentctlError):
+                    exc.hint = f"{exc.hint} {note}" if exc.hint else note
+                else:
+                    exc.add_note(note)
             raise
 
         session.hc_terminal_id = terminal.address
@@ -269,6 +311,35 @@ class SessionService:
             native_session_id=session.native_session_id,
             ready=self._wait_ready(session, wait_timeout),
         )
+
+    def _remove_created_resources(
+        self,
+        *,
+        worktree_path: str | None,
+        worktree_branch: str | None,
+        git_root: str | None,
+        native_dir: str | None,
+    ) -> list[str]:
+        """Undo what `create` made; return anything it could not undo.
+
+        A cleanup failure is reported, never swallowed: the session row is gone,
+        so no later command can discover the leftover.
+        """
+        leftovers: list[str] = []
+        if worktree_path and git_root:
+            removed, message = remove_worktree(
+                repo_root=git_root, path=worktree_path, branch=worktree_branch
+            )
+            if not removed:
+                leftovers.append(
+                    f"worktree {worktree_path} ({message or 'git worktree remove failed'})"
+                )
+        if native_dir:
+            # The row is gone, so this directory can never be resumed or pruned.
+            shutil.rmtree(native_dir, ignore_errors=True)
+            if Path(native_dir).exists():
+                leftovers.append(f"session directory {native_dir}")
+        return leftovers
 
     def _wait_ready(self, session: Session, timeout: float) -> bool:
         """Whether the agent has reported status; optionally wait for it.
@@ -356,7 +427,7 @@ class SessionService:
 
     def delete(self, workspace: Workspace, name_or_id: str, *, keep_worktree: bool = False) -> Session:
         session = self.get(workspace, name_or_id)
-        terminal = self.lifecycle.find_terminal(session)
+        terminal = self.lifecycle.find_terminal(session, refuse_address_collision=True)
         if terminal is not None and terminal.live:
             try:
                 self.runtime.kill(terminal.address)
@@ -372,11 +443,16 @@ class SessionService:
             from agentctl.session.worktree import worktree_is_clean
 
             if worktree_is_clean(session.worktree_path):
-                remove_worktree(
+                removed, message = remove_worktree(
                     repo_root=session.git_root,
                     path=session.worktree_path,
                     branch=session.worktree_branch,
                 )
+                if not removed:
+                    kept_worktree_note = (
+                        f"worktree kept at {session.worktree_path} "
+                        f"({message or 'git worktree remove failed'})"
+                    )
             else:
                 # Uncommitted worker output is project data: keep it and say so.
                 kept_worktree_note = (
@@ -397,33 +473,40 @@ class SessionService:
     def prune(self, workspace: Workspace, *, dry_run: bool = False) -> PruneResult:
         """Reclaim agentctl-owned state for this workspace's soft-deleted rows.
 
-        Only directories inside `session_state_dir()` are removed. Worktrees,
-        git branches and agent-global stores are project/agent data and stay.
+        The deletion target is derived from the session id, never taken from the
+        row's `native_session_dir`. A corrupted or tampered row can therefore
+        only ever point at its own directory. A recorded path that disagrees is
+        reported as a note and otherwise ignored. Worktrees, git branches and
+        agent-global stores are project/agent data and stay.
         """
         result = PruneResult(dry_run=dry_run)
         state_dir = Path(session_state_dir()).resolve()
         for session in self.store.sessions.list_deleted(workspace.id):
-            resolved: Path | None = None
+            target = state_dir / session.id
+            # The id must name a direct child, and that child must be a real
+            # directory. Resolving a planted symlink would let it redirect the
+            # delete to another session's directory.
+            if target.parent != state_dir or target.is_symlink():
+                result.errors.append(
+                    f"session {session.name!r}: refusing unsafe session id {session.id!r}"
+                )
+                continue
             if session.native_session_dir:
-                resolved = Path(session.native_session_dir).resolve()
-                # Session state dirs are direct children (`<state>/<session id>`).
-                # A nested target can only come from a broken row, and this
-                # command deletes data, so refuse anything else.
-                if resolved.parent != state_dir:
-                    result.errors.append(
-                        f"session {session.name!r}: refusing to remove "
-                        f"{resolved} (not a direct session directory under {state_dir})"
+                claimed = Path(session.native_session_dir).resolve()
+                if claimed != target.resolve():
+                    result.notes.append(
+                        f"session {session.name!r}: recorded path {claimed} ignored; "
+                        f"removing {target}"
                     )
-                    continue
-            if resolved is None or not resolved.exists():
+            if not target.exists():
                 if not dry_run:
                     self.store.sessions.hard_delete(session.id)
                 result.sessions += 1
                 continue
             try:
-                size = _directory_size(resolved)
+                size = _directory_size(target)
             except OSError as exc:
-                result.errors.append(f"session {session.name!r}: cannot size {resolved}: {exc}")
+                result.errors.append(f"session {session.name!r}: cannot size {target}: {exc}")
                 continue
             if dry_run:
                 result.directories += 1
@@ -431,9 +514,9 @@ class SessionService:
                 result.sessions += 1
                 continue
             try:
-                shutil.rmtree(resolved)
+                shutil.rmtree(target)
             except OSError as exc:
-                result.errors.append(f"session {session.name!r}: cannot remove {resolved}: {exc}")
+                result.errors.append(f"session {session.name!r}: cannot remove {target}: {exc}")
                 continue
             self.store.sessions.hard_delete(session.id)
             result.sessions += 1
@@ -483,7 +566,7 @@ class SessionService:
             cwd=session.cwd,
             name=self.hc_name_for(session.id, session.name),
             labels=worker_labels(workspace, session),
-            parent=leader_terminal(self.store, workspace),
+            parent=self._leader_terminal(workspace),
             outlive_parent=True,
         )
         stamp = now()
@@ -526,24 +609,11 @@ def worker_labels(workspace: Workspace, session: Session) -> dict[str, str]:
     The role label is also what stops a Worker's terminal being adopted as the
     Leader: `leader attach` refuses anything carrying `agentctl.role=worker`.
     """
-    from agentctl.leader.service import ROLE_LABEL, WORKER_ROLE
-
     return {
         "agentctl.workspace": workspace.id,
         "agentctl.session": session.id,
         ROLE_LABEL: WORKER_ROLE,
     }
-
-
-def leader_terminal(store, workspace: Workspace) -> str | None:
-    """The Leader's terminal, which becomes the Worker's Herdr parent.
-
-    A child that is given a parent gets Herdr's native notes; `--outlive-parent`
-    keeps it alive when that parent ends. With no bound Leader the Worker is
-    simply parentless, which loses the notes but never its survival.
-    """
-    binding = store.leaders.get(workspace.id)
-    return binding.terminal if binding else None
 
 
 def launch_env(workspace: Workspace, session: Session) -> dict[str, str]:

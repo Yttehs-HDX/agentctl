@@ -8,8 +8,13 @@ import subprocess
 from agentctl.agents.definitions import AgentDefinition
 
 
+def installed_command(command: list[str]) -> bool:
+    """Whether the executable a spec will actually launch is on PATH."""
+    return bool(command) and shutil.which(command[0]) is not None
+
+
 def installed(definition: AgentDefinition) -> bool:
-    return shutil.which(definition.command[0]) is not None
+    return installed_command(definition.command)
 
 
 def version(definition: AgentDefinition) -> str | None:

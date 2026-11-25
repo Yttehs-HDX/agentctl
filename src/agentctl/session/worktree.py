@@ -31,6 +31,22 @@ def git_toplevel(path: str) -> str | None:
     return proc.stdout.strip() or None
 
 
+def repair_worktree(repo_root: str, path: str) -> None:
+    """Repair Git metadata after a repository or linked worktree moves."""
+    proc = subprocess.run(
+        ["git", "-C", repo_root, "worktree", "repair", path],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        message = detail[-1] if detail else f"git exited {proc.returncode}"
+        raise WorktreeError(
+            f"git worktree repair failed: {message}",
+            f"inspect `git -C {repo_root} worktree list` and the worktree at {path}",
+        )
+
+
 def worktree_root(workspace_root: str) -> Path:
     return Path(workspace_root) / WORKTREE_DIR_NAME / "worktrees"
 
@@ -111,13 +127,22 @@ def _branch_slug(name: str) -> str:
     return slug
 
 
-def remove_worktree(*, repo_root: str, path: str, branch: str | None) -> None:
-    """Remove a clean worktree. The branch is kept so worker commits survive."""
-    subprocess.run(
+def remove_worktree(*, repo_root: str, path: str, branch: str | None) -> tuple[bool, str | None]:
+    """Remove a clean worktree, reporting whether git actually did it.
+
+    The branch is dropped only when git considers it merged (`-d` refuses
+    otherwise), so that refusal is expected and is not a failure: worker commits
+    stay. The worktree removal itself must be reported, because the caller marks
+    the session deleted and may not claim cleanup it did not get.
+    """
+    proc = subprocess.run(
         ["git", "-C", repo_root, "worktree", "remove", "--force", path],
         capture_output=True,
         text=True,
     )
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout).strip().splitlines()
+        return False, detail[-1] if detail else f"git worktree remove exited {proc.returncode}"
     if branch:
         # Remove the branch only when git can do it without losing commits
         # (i.e. it is fully merged). -d refuses otherwise; -D would destroy work.
@@ -126,6 +151,7 @@ def remove_worktree(*, repo_root: str, path: str, branch: str | None) -> None:
             capture_output=True,
             text=True,
         )
+    return True, None
 
 
 def _exclude_worktree_dir(repo_root: str) -> None:

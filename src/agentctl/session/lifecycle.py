@@ -72,9 +72,9 @@ class LifecycleManager:
         self.store = store
         self.runtime = runtime
 
-    # ------------------------------------------------------------- discovery
-
-    def find_terminal(self, session: Session) -> TerminalInfo | None:
+    def find_terminal(
+        self, session: Session, *, refuse_address_collision: bool = False
+    ) -> TerminalInfo | None:
         """Locate this session's runtime terminal: by persisted id, then by label.
 
         Only local terminals count. `hc` addresses remote ones as `machine/t7`,
@@ -82,26 +82,30 @@ class LifecycleManager:
         that happens to carry our label must never be adopted: `send` would type
         into another machine and `delete` would kill work we never started.
         """
+        labels = {"agentctl.workspace": session.workspace_id, "agentctl.session": session.id}
+
+        def owned(terminal: TerminalInfo) -> bool:
+            return terminal.is_local and all(terminal.labels.get(k) == v for k, v in labels.items())
+
+        collision = False
         if session.hc_terminal_id:
             terminal = self.runtime.find_terminal(session.hc_terminal_id)
-            if terminal is not None and terminal.is_local:
+            if terminal is not None and owned(terminal):
                 return terminal
-        terminals = [
-            t
-            for t in self.runtime.list_terminals(
-                labels={"agentctl.session": session.id}, include_finished=False
+            collision = terminal is not None
+        for candidate in self.runtime.list_terminals(labels=labels, include_finished=False):
+            if candidate.is_local:
+                # The ls response need not contain labels or the status record.
+                terminal = self.runtime.find_terminal(candidate.address)
+                if terminal is not None and owned(terminal):
+                    return terminal
+        if collision and refuse_address_collision:
+            raise RuntimeFailure(
+                f"saved address {session.hc_terminal_id} belongs to a different terminal",
+                "check that you are using the original Herdr Core before deleting this Worker",
+                kind="terminal_identity_mismatch",
             )
-            if t.is_local
-        ]
-        if not terminals:
-            return None
-        # `hc ls` reports `reported: null`; only `hc get` carries the status
-        # record. Delivery proof depends on `reported`, so enrich the label
-        # fallback instead of trusting the list shape.
-        try:
-            return self.runtime.get_terminal(terminals[0].address)
-        except RuntimeFailure:
-            return terminals[0]
+        return None
 
     def refresh(self, session: Session, *, persist: bool = True) -> Session:
         """Re-derive one session's status from the runtime and persist it."""

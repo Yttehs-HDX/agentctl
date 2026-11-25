@@ -48,11 +48,11 @@ def _ancestors(path: str) -> list[str]:
     return chain
 
 
-def explicit_root(value: str | None) -> str | None:
+def explicit_root(value: str | None, *, allow_missing: bool = False) -> str | None:
     """Canonicalize a caller-supplied path, or None when none was given."""
     if value is None or value == "":
         return None
-    return canonical(value)
+    return canonical(value, allow_missing=allow_missing)
 
 
 def nearest_workspace(store, path: str) -> Workspace | None:
@@ -74,9 +74,16 @@ def _contains(root: str, path: str) -> bool:
     return candidate == root_path or root_path in candidate.parents
 
 
-def discover(store, *, explicit: str | None = None, env: str | None = None, cwd: str | None = None) -> WorkspaceChoice:
+def discover(
+    store,
+    *,
+    explicit: str | None = None,
+    env: str | None = None,
+    cwd: str | None = None,
+    allow_missing: bool = False,
+) -> WorkspaceChoice:
     """Resolve the workspace for a command that requires an existing one."""
-    resolved = explicit_root(explicit)
+    resolved = explicit_root(explicit, allow_missing=allow_missing)
     if resolved is not None:
         workspace = store.workspaces.find_by_root(resolved)
         if workspace is None:
@@ -86,7 +93,7 @@ def discover(store, *, explicit: str | None = None, env: str | None = None, cwd:
             )
         return WorkspaceChoice(workspace, "flag")
 
-    resolved_env = explicit_root(env)
+    resolved_env = explicit_root(env, allow_missing=allow_missing)
     if resolved_env is not None:
         workspace = store.workspaces.find_by_root(resolved_env)
         if workspace is None:

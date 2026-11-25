@@ -21,6 +21,7 @@ from tests.conftest import read_state
 @pytest.fixture()
 def env(tmp_path: Path, workspace: Path, fake_hc: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(detector, "installed", lambda definition: True)
+    monkeypatch.setattr(detector, "installed_command", lambda command: True)
     monkeypatch.delenv("HC_TERMINAL_ID", raising=False)
     conn = open_connection()
     store = Store(conn)
@@ -68,6 +69,21 @@ def test_attach_records_the_leader_terminal_and_labels_it(env) -> None:
     assert state["terminals"]["t1"]["labels"]["agentctl.workspace"] == ws.id
 
 
+def test_name_based_legacy_binding_can_be_reattached(env) -> None:
+    from agentctl.workspace.service import WorkspaceService
+
+    store, ws, runtime, _sessions, state_file = env
+    _add_terminal(state_file, "tz", {})
+    service = LeaderService(store, runtime)
+    service.attach(ws, terminal="tz")
+    store.conn.execute(
+        "UPDATE leader_bindings SET terminal = ? WHERE workspace_id = ?", ("term-tz", ws.id)
+    )
+
+    assert WorkspaceService(store, runtime).info(ws).orphan_terminals == []
+    assert service.attach(ws, terminal="term-tz").terminal == "tz"
+
+
 def test_a_worker_terminal_cannot_become_the_leader(env) -> None:
     store, ws, runtime, sessions, state_file = env
     created = sessions.create(ws, CreateRequest(name="w1", agent="omp", cwd=ws.root_path))
@@ -75,6 +91,13 @@ def test_a_worker_terminal_cannot_become_the_leader(env) -> None:
     with pytest.raises(LeaderRequired) as excinfo:
         LeaderService(store, runtime).attach(ws, terminal=address)
     assert "is a Worker" in excinfo.value.message
+
+
+def test_a_legacy_worker_without_a_role_cannot_become_leader(env) -> None:
+    store, ws, runtime, _sessions, state_file = env
+    _add_terminal(state_file, "tz", {"agentctl.workspace": ws.id, "agentctl.session": "sess_legacy"})
+    with pytest.raises(LeaderRequired):
+        LeaderService(store, runtime).attach(ws, terminal="tz")
 
 
 def test_worker_terminals_carry_the_worker_role_and_outlive_the_parent(env) -> None:
@@ -172,3 +195,100 @@ def test_workspaces_are_isolated(env, tmp_path: Path) -> None:
     service.attach(ws_b)
     assert service.current(ws_a) is not None
     assert service.current(ws_b) is not None
+
+
+def test_reused_address_does_not_count_as_the_bound_leader(env) -> None:
+    store, ws, runtime, sessions, state_file = env
+    _add_terminal(state_file, "tz", {})
+    leader = LeaderService(store, runtime)
+    leader.attach(ws, terminal="tz")
+    _add_terminal(state_file, "tz", {})
+
+    assert not leader.status(ws).live
+    worker = sessions.create(ws, CreateRequest(name="w", agent="omp", cwd=ws.root_path))
+    terminals = read_state(state_file)["terminals"]
+    assert terminals[worker.terminal.name]["parent"] is None
+
+
+def test_info_distinguishes_the_bound_leader_from_a_previous_leader(env) -> None:
+    from agentctl.workspace.service import WorkspaceService
+
+    store, ws, runtime, _sessions, state_file = env
+    _add_terminal(state_file, "ty", {})
+    _add_terminal(state_file, "tz", {})
+    leader = LeaderService(store, runtime)
+    leader.attach(ws, terminal="ty")
+    assert WorkspaceService(store, runtime).info(ws).orphan_terminals == []
+    leader.attach(ws, terminal="tz", take_over=True)
+    assert WorkspaceService(store, runtime).info(ws).orphan_terminals == ["ty"]
+
+
+def test_wait_after_takeover_reports_only_the_new_leaders_children(env) -> None:
+    from typer.testing import CliRunner
+
+    from agentctl.cli import app
+    from agentctl.config import save_config
+
+    store, ws, runtime, sessions, state_file = env
+    _add_terminal(state_file, "ty", {})
+    _add_terminal(state_file, "tz", {})
+    leader = LeaderService(store, runtime)
+    leader.attach(ws, terminal="ty")
+    sessions.create(ws, CreateRequest(name="old-worker", agent="omp", cwd=ws.root_path))
+    leader.attach(ws, terminal="tz", take_over=True)
+    save_config(default_config())
+
+    runner = CliRunner()
+    arguments = ["--workspace", ws.root_path, "--json", "wait", "--all", "--timeout", "1"]
+    result = runner.invoke(app, arguments)
+    assert result.exit_code == 0, result.output
+    body = json.loads(result.stdout)
+    assert body["scope"] == "leader_children"
+    assert body["parent"] == "tz"
+    assert body["children"] == []
+
+    current = sessions.create(ws, CreateRequest(name="new-worker", agent="omp", cwd=ws.root_path))
+    result = runner.invoke(app, arguments)
+    assert result.exit_code == 0, result.output
+    assert [child["terminal"] for child in json.loads(result.stdout)["children"]] == [current.terminal.address]
+
+    leader.detach(ws)
+    result = runner.invoke(app, arguments)
+    assert isinstance(result.exception, LeaderRequired)
+
+
+def test_attach_after_a_concurrent_commit_is_refused(env) -> None:
+    store, ws, runtime, _sessions, _state = env
+    service = LeaderService(store, runtime)
+    first = runtime.create_terminal(["sleep", "60"], cwd=ws.root_path, name="lead-a")
+    service.attach(ws, terminal=first.address)
+    second = runtime.create_terminal(["sleep", "60"], cwd=ws.root_path, name="lead-b")
+
+    # The first attach's row and label are committed together, so a second
+    # attacher that validated against a pre-commit read must still refuse.
+    with pytest.raises(LeaderRequired, match="already led"):
+        service.attach(ws, terminal=second.address)
+
+    binding = store.leaders.get(ws.id)
+    assert binding is not None
+    assert binding.terminal == first.address
+    loser = runtime.find_terminal(second.address)
+    assert loser is not None
+    assert loser.labels.get(ROLE_LABEL) != LEADER_ROLE
+
+
+def test_attach_labels_inside_the_write_transaction(env, monkeypatch) -> None:
+    store, ws, runtime, _sessions, _state = env
+    seen: dict[str, object] = {}
+    original = runtime.label
+
+    def label(address, labels):
+        seen["in_transaction"] = store.conn.in_transaction
+        seen["row_visible"] = store.leaders.get(ws.id) is not None
+        return original(address, labels)
+
+    monkeypatch.setattr(runtime, "label", label)
+    terminal = runtime.create_terminal(["sleep", "60"], cwd=ws.root_path, name="lead")
+    LeaderService(store, runtime).attach(ws, terminal=terminal.address)
+    assert seen["in_transaction"] is True
+    assert seen["row_visible"] is True

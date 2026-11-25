@@ -146,7 +146,7 @@ class RuntimeFinished(RuntimeFailure):
 
 
 class LeaderRequired(AgentctlError):
-    """The workspace is already led from a terminal that is still live."""
+    """A command conflicts with the workspace's Leader binding."""
 
     code = "leader_conflict"
     exit_code = EXIT_CONFLICT  # 5

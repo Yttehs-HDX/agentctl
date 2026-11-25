@@ -135,6 +135,7 @@ def test_unknown_status_word_is_not_coerced() -> None:
 @pytest.fixture()
 def live(workspace: Path, fake_hc: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(detector, "installed", lambda d: d.id == "omp")
+    monkeypatch.setattr(detector, "installed_command", lambda command: command[0] == "omp")
     conn = open_connection()
     store = Store(conn)
     ws, _ = WorkspaceResolver(store).get_or_create(str(workspace))
@@ -269,7 +270,7 @@ def test_remote_terminal_is_never_adopted(monkeypatch: pytest.MonkeyPatch) -> No
         cwd="/tmp",
         exit_code=None,
         reason=None,
-        labels={"agentctl.session": session.id},
+        labels={"agentctl.session": session.id, "agentctl.workspace": session.workspace_id},
     )
     manager = LifecycleManager(store=None, runtime=_StubRuntime(find=None, listed=[remote]))
     assert manager.find_terminal(session) is None
@@ -286,6 +287,7 @@ def test_remote_address_is_never_trusted_as_persisted_id(monkeypatch: pytest.Mon
         cwd="/tmp",
         exit_code=None,
         reason=None,
+        labels={"agentctl.session": session.id, "agentctl.workspace": session.workspace_id},
     )
     manager = LifecycleManager(store=None, runtime=_StubRuntime(find=remote, listed=[]))
     assert manager.find_terminal(session) is None
@@ -302,7 +304,7 @@ def test_local_terminal_is_still_found_among_remotes() -> None:
         cwd="/tmp",
         exit_code=None,
         reason=None,
-        labels={"agentctl.session": session.id},
+        labels={"agentctl.session": session.id, "agentctl.workspace": session.workspace_id},
     )
     remote = TerminalInfo(
         address="boxb/t1",
@@ -313,12 +315,66 @@ def test_local_terminal_is_still_found_among_remotes() -> None:
         cwd="/tmp",
         exit_code=None,
         reason=None,
-        labels={"agentctl.session": session.id},
+        labels={"agentctl.session": session.id, "agentctl.workspace": session.workspace_id},
     )
     manager = LifecycleManager(store=None, runtime=_StubRuntime(find=None, listed=[remote, local]))
     found = manager.find_terminal(session)
     assert found is not None
     assert found.address == "t1"
+
+
+def test_persisted_terminal_with_historical_identity_labels_is_accepted() -> None:
+    session = make_session()
+    owned = terminal(
+        labels={"agentctl.session": session.id, "agentctl.workspace": session.workspace_id}
+    )
+    manager = LifecycleManager(store=None, runtime=_StubRuntime(find=owned, listed=[]))
+    assert manager.find_terminal(session) is owned
+
+
+@pytest.mark.parametrize("key", ["agentctl.workspace", "agentctl.session"])
+def test_persisted_terminal_with_mismatched_identity_is_rejected(key: str) -> None:
+    session = make_session()
+    labels = {"agentctl.session": session.id, "agentctl.workspace": session.workspace_id}
+    labels[key] = "wrong"
+    unrelated = terminal(labels=labels)
+    manager = LifecycleManager(store=None, runtime=_StubRuntime(find=unrelated, listed=[]))
+    assert manager.find_terminal(session) is None
+
+
+def test_fallback_skips_terminal_from_another_workspace() -> None:
+    session = make_session(hc_terminal_id=None)
+    wrong = terminal(
+        address="t1",
+        labels={"agentctl.session": session.id, "agentctl.workspace": "ws_other"},
+    )
+    owned = terminal(
+        address="t2",
+        labels={"agentctl.session": session.id, "agentctl.workspace": session.workspace_id},
+    )
+    manager = LifecycleManager(store=None, runtime=_StubRuntime(find=None, listed=[wrong, owned]))
+    assert manager.find_terminal(session) is owned
+
+
+def test_fallback_rechecks_full_terminal_ownership() -> None:
+    session = make_session(hc_terminal_id=None)
+    unrelated = terminal(
+        address="t1",
+        labels={"agentctl.session": session.id, "agentctl.workspace": "ws_other"},
+    )
+
+    class ProjectedRuntime:
+        def list_terminals(self, *, labels=None, include_finished=False):
+            return [terminal(address="t1", labels={})]
+
+        def find_terminal(self, address):
+            return unrelated
+
+        def get_terminal(self, address):
+            return unrelated
+
+    manager = LifecycleManager(store=None, runtime=ProjectedRuntime())
+    assert manager.find_terminal(session) is None
 
 
 class _StubRuntime:
@@ -327,7 +383,7 @@ class _StubRuntime:
         self._listed = listed
 
     def find_terminal(self, terminal):
-        return self._find
+        return next((info for info in self._listed if info.address == terminal), self._find)
 
     def list_terminals(self, *, labels=None, include_finished=False):
         return list(self._listed)

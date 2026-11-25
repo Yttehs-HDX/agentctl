@@ -42,6 +42,7 @@ def _fake_hc_state() -> Path:
 @pytest.fixture()
 def setup(workspace: Path, fake_hc: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(detector, "installed", lambda d: d.id == "omp")
+    monkeypatch.setattr(detector, "installed_command", lambda command: command[0] == "omp")
     conn = open_connection()
     store = Store(conn)
     ws, _ = WorkspaceResolver(store).get_or_create(str(workspace))
@@ -290,18 +291,52 @@ def test_first_task_is_passed_at_launch(setup, workspace: Path) -> None:
 
 def test_worker_is_parented_to_the_leader_and_outlives_it(setup, workspace: Path) -> None:
     """`--parent` gives Herdr's notes, `--outlive-parent` keeps it alive."""
+    from agentctl.leader.service import LeaderService
+
     service, store, ws, _config = setup
     service.create(ws, CreateRequest(name="lone", agent="omp", cwd=str(workspace)))
     alone = _last_run_argv()
     assert "--no-parent" in alone, "no Leader bound, so no parent"
     assert "--outlive-parent" in alone
 
-    store.conn.execute(
-        "INSERT INTO leader_bindings(workspace_id, leader_id, terminal, native_session_id,"
-        " attached_at, updated_at) VALUES(?,?,?,?,?,?)",
-        (ws.id, ws.leader_id, "t1", None, "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
-    )
+    leader = service.runtime.create_terminal(["sleep", "60"], cwd=str(workspace), name="leader")
+    LeaderService(store, service.runtime).attach(ws, terminal=leader.address)
     service.create(ws, CreateRequest(name="child", agent="omp", cwd=str(workspace)))
     with_leader = _last_run_argv()
-    assert with_leader[with_leader.index("--parent") + 1] == "t1"
+    assert with_leader[with_leader.index("--parent") + 1] == leader.address
     assert "--outlive-parent" in with_leader
+
+
+def test_name_race_is_a_conflict_not_a_raw_integrity_error(
+    setup, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentctl.paths import session_state_dir
+
+    service, store, ws, _config = setup
+    service.create(ws, CreateRequest(name="dup", agent="omp", cwd=str(workspace)))
+    before = {p.name for p in Path(session_state_dir()).glob("sess_*")}
+    # Simulate two processes passing the pre-check together: only the unique
+    # index sees the collision.
+    monkeypatch.setattr(store.sessions, "find_in_workspace", lambda *args, **kwargs: None)
+    with pytest.raises(SessionNameConflict):
+        service.create(ws, CreateRequest(name="dup", agent="omp", cwd=str(workspace)))
+    assert len(store.sessions.list_for_workspace(ws.id)) == 1
+    assert {p.name for p in Path(session_state_dir()).glob("sess_*")} == before
+
+
+def test_failed_spawn_leaves_no_row_and_no_native_dir(
+    setup, workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentctl.errors import RuntimeSpawnFailed
+    from agentctl.paths import session_state_dir
+
+    service, store, ws, _config = setup
+
+    def fail(*args, **kwargs):
+        raise RuntimeSpawnFailed("spawn failed")
+
+    monkeypatch.setattr(service.runtime, "create_terminal", fail)
+    with pytest.raises(RuntimeSpawnFailed):
+        service.create(ws, CreateRequest(name="dead", agent="omp", cwd=str(workspace)))
+    assert store.sessions.find_in_workspace(ws.id, "dead") is None
+    assert list(Path(session_state_dir()).glob("sess_*")) == []

@@ -14,6 +14,7 @@ from agentctl.session.service import CreateRequest, SessionService
 from agentctl.session.worktree import _branch_slug, worktree_is_clean
 from agentctl.storage import Store, open_connection
 from agentctl.workspace.resolver import WorkspaceResolver
+from agentctl.workspace.service import WorkspaceService
 import agentctl.agents.detector as detector
 
 
@@ -24,6 +25,7 @@ def git(*args: str, cwd: Path) -> None:
 @pytest.fixture()
 def repo(tmp_path: Path, fake_hc: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(detector, "installed", lambda d: d.id == "omp")
+    monkeypatch.setattr(detector, "installed_command", lambda command: command[0] == "omp")
     root = tmp_path / "repo"
     root.mkdir()
     git("init", "-q", ".", cwd=root)
@@ -114,6 +116,7 @@ def test_keep_worktree_flag_skips_removal(repo) -> None:
 
 def test_non_git_directory_is_rejected(tmp_path: Path, fake_hc: Path, monkeypatch) -> None:
     monkeypatch.setattr(detector, "installed", lambda d: d.id == "omp")
+    monkeypatch.setattr(detector, "installed_command", lambda command: command[0] == "omp")
     plain = tmp_path / "plain"
     plain.mkdir()
     conn = open_connection()
@@ -206,3 +209,87 @@ def test_bad_base_ref_is_reported(repo) -> None:
             ws, CreateRequest(name="bad", agent=None, cwd=str(root), mode="worktree", base_ref="nosuchref")
         )
     assert store.sessions.find_in_workspace(ws.id, "bad") is None
+
+
+def test_rebind_after_move_restores_worktree(repo, tmp_path: Path) -> None:
+    service, store, ws, root = repo
+    created = service.create(
+        ws, CreateRequest(name="moving", agent=None, cwd=str(root), mode="worktree")
+    )
+    moved = tmp_path / "moved"
+    root.rename(moved)
+
+    WorkspaceService(store, runtime=None).rebind(ws, str(moved))
+
+    session = store.sessions.find_by_id(created.session.id)
+    expected = moved / ".agentctl" / "worktrees" / created.session.id
+    assert session.cwd == str(expected)
+    assert session.worktree_path == str(expected)
+    assert session.git_root == str(moved)
+    git("status", "--porcelain", cwd=expected)
+    listing = subprocess.run(
+        ["git", "worktree", "list", "--porcelain"], cwd=moved, capture_output=True, text=True, check=True
+    ).stdout
+    assert str(expected) in listing
+
+
+def test_rebind_keeps_external_git_root_and_repairs_worktree(repo, tmp_path: Path) -> None:
+    service, store, _ws, root = repo
+    nested = root / "nested"
+    nested.mkdir()
+    ws = WorkspaceResolver(store).get_or_create(str(nested))[0]
+    created = service.create(
+        ws, CreateRequest(name="external", agent=None, cwd=str(nested), mode="worktree")
+    )
+    moved = tmp_path / "moved-nested"
+    nested.rename(moved)
+
+    WorkspaceService(store, runtime=None).rebind(ws, str(moved))
+
+    session = store.sessions.find_by_id(created.session.id)
+    expected = moved / ".agentctl" / "worktrees" / created.session.id
+    assert session.git_root == str(root)
+    assert session.worktree_path == str(expected)
+    git("status", "--porcelain", cwd=expected)
+
+
+def test_rebind_ignores_missing_worktree_from_deleted_session(repo, tmp_path: Path) -> None:
+    service, store, ws, root = repo
+    created = service.create(
+        ws, CreateRequest(name="gone", agent=None, cwd=str(root), mode="worktree")
+    )
+    service.delete(ws, "gone")
+    assert not Path(created.session.worktree_path).exists()
+    moved = tmp_path / "moved"
+    root.rename(moved)
+
+    WorkspaceService(store, runtime=None).rebind(ws, str(moved))
+
+    session = store.sessions.find_by_id(created.session.id)
+    assert session.deleted_at is not None
+    assert session.worktree_path == str(moved / ".agentctl" / "worktrees" / created.session.id)
+
+
+def test_rebind_repair_failure_preserves_registry_paths(repo, tmp_path: Path, monkeypatch) -> None:
+    from agentctl.session.worktree import WorktreeError
+
+    service, store, ws, root = repo
+    created = service.create(
+        ws, CreateRequest(name="broken", agent=None, cwd=str(root), mode="worktree")
+    )
+    moved = tmp_path / "moved"
+    root.rename(moved)
+
+    def fail_repair(*args, **kwargs):
+        return subprocess.CompletedProcess(args[0], 1, stdout="", stderr="repair failed")
+
+    monkeypatch.setattr("agentctl.session.worktree.subprocess.run", fail_repair)
+    with pytest.raises(WorktreeError, match="repair failed"):
+        WorkspaceService(store, runtime=None).rebind(ws, str(moved))
+
+    assert ws.root_path == str(root)
+    assert store.workspaces.find_by_id(ws.id).root_path == str(root)
+    session = store.sessions.find_by_id(created.session.id)
+    assert session.cwd == created.session.cwd
+    assert session.worktree_path == created.session.worktree_path
+    assert session.git_root == created.session.git_root

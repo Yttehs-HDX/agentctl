@@ -14,15 +14,18 @@ Herdr Core.
 | file | covers |
 | --- | --- |
 | `test_workspace.py` | canonical paths, stable ids across reopen, symlink identity, `..` escape |
+| `test_database.py` | newer schema refusal without registry writes |
 | `test_config.py` | TOML round-trip, schema validation, empty default agent |
 | `test_agents.py` | catalog resolution, disabled/missing/unknown agents, version verification |
 | `test_runtime.py` | `hc` argv shape, verbatim sends, error-kind mapping, label filters |
 | `test_session.py` | create, readiness, name rules, cwd policy, first task, parentage, rollback, delete |
 | `test_lifecycle.py` | status mapping, label-based terminal rediscovery, recovery rules |
 | `test_messaging.py` | send through Herdr, `--force`, `--wait`, honest `started: false`, keys, interrupt |
-| `test_prune.py` | dry run, directory/row removal, live rows and outside paths kept |
-| `test_recovery.py` | leader restart: same identity, same sessions, `recover`, isolation |
-| `test_worktree.py` | worktree creation, branch naming, cleanup policy, non-git rejection |
+| `test_prune.py` | dry run, derived target, ignored claims, symlink refusal, live rows kept |
+| `test_cleanup.py` | a refused `git worktree remove` is reported, never assumed |
+| `test_rebind_cli.py` | rebind after `mv`, through the CLI, from the moved path |
+| `test_recovery.py` | leader restart, recovery, workspace isolation, rebind after a directory move |
+| `test_worktree.py` | worktree creation, branch naming, cleanup policy, non-git rejection, moved-worktree repair |
 | `test_cli.py` | JSON envelope and schema, `--json` argv handling, usage errors |
 | `test_discovery.py` | workspace auto-detection: precedence, nesting, symlinks, failures |
 | `test_leader.py` | binding: attach, refusal, Worker takeover guard, staleness from Herdr |

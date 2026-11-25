@@ -194,6 +194,26 @@ class SessionRepository:
             ),
         )
 
+    def update_paths(
+        self,
+        session_id: str,
+        *,
+        cwd: str,
+        worktree_path: str | None,
+        git_root: str | None,
+        native_session_dir: str | None,
+        updated_at: str,
+    ) -> None:
+        self.conn.execute(
+            """
+            UPDATE sessions
+               SET cwd = ?, worktree_path = ?, git_root = ?, native_session_dir = ?,
+                   updated_at = ?
+             WHERE id = ?
+            """,
+            (cwd, worktree_path, git_root, native_session_dir, updated_at, session_id),
+        )
+
     def set_status(self, session_id: str, status: str, last_error: str | None, updated_at: str) -> None:
         self.conn.execute(
             "UPDATE sessions SET status = ?, last_error = ?, updated_at = ? WHERE id = ?",
@@ -244,18 +264,15 @@ class LeaderRepository:
         ).fetchone()
         return _row_to_binding(row) if row else None
 
-    def upsert(self, binding: LeaderBinding) -> None:
-        self.conn.execute(
+    def insert_if_absent(self, binding: LeaderBinding) -> bool:
+        """Create the binding only if no other process created one first."""
+        cursor = self.conn.execute(
             """
             INSERT INTO leader_bindings(
                 workspace_id, leader_id, terminal, native_session_id,
                 attached_at, updated_at
             ) VALUES(?, ?, ?, ?, ?, ?)
-            ON CONFLICT(workspace_id) DO UPDATE SET
-                leader_id = excluded.leader_id,
-                terminal = excluded.terminal,
-                native_session_id = excluded.native_session_id,
-                updated_at = excluded.updated_at
+            ON CONFLICT(workspace_id) DO NOTHING
             """,
             (
                 binding.workspace_id,
@@ -266,6 +283,38 @@ class LeaderRepository:
                 binding.updated_at,
             ),
         )
+        return cursor.rowcount == 1
+
+    def update_if_unchanged(
+        self,
+        binding: LeaderBinding,
+        *,
+        expected_terminal: str | None,
+        expected_native: str | None,
+    ) -> bool:
+        """Replace a binding only if it still has the identity the caller read.
+
+        This is the compare half of the attach race: two Leaders can both read
+        the row, but only one write matches it. `IS` rather than `=` so a NULL
+        terminal compares equal to a NULL expectation.
+        """
+        cursor = self.conn.execute(
+            """
+            UPDATE leader_bindings
+               SET leader_id = ?, terminal = ?, native_session_id = ?, updated_at = ?
+             WHERE workspace_id = ? AND terminal IS ? AND native_session_id IS ?
+            """,
+            (
+                binding.leader_id,
+                binding.terminal,
+                binding.native_session_id,
+                binding.updated_at,
+                binding.workspace_id,
+                expected_terminal,
+                expected_native,
+            ),
+        )
+        return cursor.rowcount == 1
 
     def delete(self, workspace_id: str) -> bool:
         cursor = self.conn.execute(

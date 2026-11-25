@@ -163,19 +163,12 @@ class HerdrCoreAdapter(RuntimeAdapter):
         return _terminal(self._run_json(args))
 
     def wait_children(
-        self, *, parent: str | None = None, mode: str = "any", timeout: float | None = None
+        self, *, parent: str, mode: str = "any", timeout: float | None = None
     ) -> WaitOutcome:
-        """`hc wait --children any|all`: the native multi-worker barrier.
-
-        With no `parent`, the wait is the caller's own view of its children,
-        which is what a Leader running inside Herdr wants. An outside Leader
-        passes the terminal it wants children of.
-        """
+        """Wait on the given parent's Herdr children."""
         if mode not in ("any", "all"):
             raise RuntimeFailure(f"unknown children mode {mode!r}")
-        args = ["wait", "--json", "--children", mode]
-        if parent:
-            args.append(parent)
+        args = ["wait", "--json", "--children", mode, parent]
         if timeout is not None:
             args.extend(["--timeout", f"{timeout:g}"])
         body = self._run_json(args, timeout=(timeout or 180) + 30)

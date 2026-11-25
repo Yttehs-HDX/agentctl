@@ -44,11 +44,11 @@ agentctl config set default-agent omp
 cd ~/projects/example
 agentctl init                     # register this directory as the workspace
 
-agentctl leader attach            # from the Leader's own terminal, optional
+agentctl leader attach            # from the Leader's Herdr terminal; needed for group waits
 agentctl create --name researcher --agent omp --cwd docs --task "Map the module layout"
 agentctl create --name reviewer   --agent claude --cwd . --task "Review src/"
 
-agentctl wait --any               # the next Worker's news
+agentctl wait --any               # news from the bound Leader's children
 agentctl read researcher
 agentctl send researcher "Focus on the parser only"
 agentctl list
@@ -96,7 +96,7 @@ is an ordinary Herdr terminal.
 | `interrupt NAME [--timeout S]` | Interrupt the agent's current turn |
 | `read NAME [--lines N] [--follow]` | Screen plus history |
 | `status [NAME] [--no-refresh]` | Session or workspace status |
-| `wait NAME [--timeout S]` / `wait --any` / `wait --all` | One turn, or the Workers' next news |
+| `wait NAME [--timeout S]` / `wait --any` / `wait --all` | One Worker, or the bound Leader's children |
 | `recover [NAME]` | Re-discover terminals, or relaunch from a native session id |
 | `leader attach\|detach\|status` | Where this workspace's Leader runs |
 | `agents list\|inspect ID` | Catalog with measured capabilities |
@@ -111,9 +111,9 @@ Every command accepts `--json`.
   status records. An agent that reports no status is `unknown`, never guessed.
 - `started: false` from `send` means the text was typed but no turn began (a
   booting agent, or a dialog). It is a doubt, not a success and not a failure.
-- `wait --any` returns on the next Worker's new turn, a block, an error or an
-  exit. `wait --all` returns when no Worker is working. Both are `hc wait
-  --children`, so Herdr decides.
+- `wait --any` and `wait --all` run Herdr's children wait for the live bound
+  Leader. They do not wait on the whole workspace. After takeover, use
+  `wait NAME` for Workers that still belong to the previous Leader.
 - A Worker whose terminal is lost is `unreachable`, and `recover` relaunches it
   only from a native session id the catalog says is resumable.
 

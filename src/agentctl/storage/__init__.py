@@ -19,6 +19,8 @@ def open_connection(path=None) -> sqlite3.Connection:
     conn = connect(path or database_path())
     try:
         initialize(conn)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
     except BaseException:
         conn.close()
         raise

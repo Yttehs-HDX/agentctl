@@ -34,7 +34,7 @@ from agentctl.runtime.base import RuntimeAdapter, TerminalInfo
 from agentctl.session.lifecycle import LifecycleManager
 from agentctl.session.worktree import create_worktree, ensure_git_repo, remove_worktree
 from agentctl.storage.models import Session, Workspace
-from agentctl.workspace.resolver import canonical, ensure_inside_workspace, now
+from agentctl.workspace.resolver import canonical, ensure_inside_workspace, now, respell_under
 
 SESSION_ID_RE = re.compile(r"([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})")
 HC_NAME_MAX = 32
@@ -133,7 +133,9 @@ class SessionService:
     def validate_cwd(self, workspace: Workspace, raw_cwd: str) -> str:
         path = canonical(raw_cwd)
         ensure_inside_workspace(path, workspace.root_path)
-        return path
+        # Store the registered spelling so `rebind`'s relative_to keeps working
+        # when the caller typed a case variant of the workspace root.
+        return respell_under(path, workspace.root_path)
 
     def hc_name_for(self, session_id: str, session_name: str) -> str:
         slug = re.sub(r"[^a-z0-9._-]+", "-", session_name.lower()).strip("-._")

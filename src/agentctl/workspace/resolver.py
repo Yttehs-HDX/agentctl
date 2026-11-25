@@ -1,8 +1,10 @@
 """Workspace identity: canonical paths in, stable UUIDs out.
 
-A Workspace is found by its canonical root path. Its id and leader id are
-created once and never derived from the path, the pid or a lock, so a Leader
-that restarts in the same directory gets its old identity back.
+A Workspace is found by its canonical root path, falling back to filesystem
+identity `(st_dev, st_ino)` when the caller spells that path differently, as
+case-insensitive filesystems allow. Its id and leader id are created once and
+never derived from the path, the pid or a lock, so a Leader that restarts in the
+same directory gets its old identity back.
 """
 
 from __future__ import annotations
@@ -43,11 +45,57 @@ def resolve_root(workspace_path: str | None) -> str:
     return canonical(workspace_path)
 
 
+def filesystem_identity(path: str) -> tuple[int, int] | None:
+    """`(st_dev, st_ino)` for `path`, or None when it cannot be stat'd."""
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return (info.st_dev, info.st_ino)
+
+
+def same_directory(a: str, b: str) -> bool:
+    """True when `a` and `b` name the same directory, however they are spelled.
+
+    Case-insensitive filesystems (macOS, Windows) hand back the caller's
+    spelling from `realpath`, so string equality is not directory identity.
+    """
+    identity = filesystem_identity(a)
+    return identity is not None and identity == filesystem_identity(b)
+
+
+def respell_under(path: str, root: str) -> str:
+    """Rewrite `path` with `root`'s spelling, keeping the tail below it."""
+    if same_directory(path, root):
+        return root
+    tail: list[str] = []
+    current = Path(path)
+    while True:
+        parent = current.parent
+        if parent == current:  # filesystem root, nothing matched
+            return path
+        tail.append(current.name)
+        if same_directory(str(parent), root):
+            return str(Path(root, *reversed(tail)))
+        current = parent
+
+
 def is_inside(child: str, parent: str) -> bool:
     """True when `child` is `parent` or lives below it (both canonical)."""
     child_path = Path(child)
     parent_path = Path(parent)
-    return child_path == parent_path or parent_path in child_path.parents
+    if child_path == parent_path or parent_path in child_path.parents:
+        return True
+    # Different spelling of the same directory: compare identities, one
+    # ancestor at a time, stopping at the filesystem root.
+    current = child_path
+    while True:
+        if same_directory(str(current), parent):
+            return True
+        upper = current.parent
+        if upper == current:
+            return False
+        current = upper
 
 
 def ensure_inside_workspace(path: str, root: str) -> None:
@@ -77,7 +125,15 @@ class WorkspaceResolver:
         self.store = store
 
     def find(self, root: str) -> Workspace | None:
-        return self.store.workspaces.find_by_root(root)
+        workspace = self.store.workspaces.find_by_root(root)
+        if workspace is not None:
+            return workspace
+        # Case-insensitive filesystems: a second spelling of a registered root
+        # is the same workspace, not a new one.
+        for candidate in self.store.workspaces.list_all():
+            if same_directory(candidate.root_path, root):
+                return candidate
+        return None
 
     def require(self, root: str) -> Workspace:
         workspace = self.find(root)

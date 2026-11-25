@@ -25,7 +25,12 @@ from pathlib import Path
 
 from agentctl.errors import InvalidPath, WorkspaceNotInitialized
 from agentctl.storage.models import Workspace
-from agentctl.workspace.resolver import canonical
+from agentctl.workspace.resolver import (
+    WorkspaceResolver,
+    canonical,
+    is_inside,
+    same_directory,
+)
 
 
 @dataclass(slots=True)
@@ -69,9 +74,8 @@ def nearest_workspace(store, path: str) -> Workspace | None:
 
 
 def _contains(root: str, path: str) -> bool:
-    root_path = Path(root)
-    candidate = Path(path)
-    return candidate == root_path or root_path in candidate.parents
+    """True when `path` is `root` or below it, by spelling or by identity."""
+    return is_inside(path, root)
 
 
 def discover(
@@ -83,9 +87,10 @@ def discover(
     allow_missing: bool = False,
 ) -> WorkspaceChoice:
     """Resolve the workspace for a command that requires an existing one."""
+    resolver = WorkspaceResolver(store)
     resolved = explicit_root(explicit, allow_missing=allow_missing)
     if resolved is not None:
-        workspace = store.workspaces.find_by_root(resolved)
+        workspace = resolver.find(resolved)
         if workspace is None:
             raise WorkspaceNotInitialized(
                 f"workspace {resolved} is not initialized",
@@ -95,7 +100,7 @@ def discover(
 
     resolved_env = explicit_root(env, allow_missing=allow_missing)
     if resolved_env is not None:
-        workspace = store.workspaces.find_by_root(resolved_env)
+        workspace = resolver.find(resolved_env)
         if workspace is None:
             raise WorkspaceNotInitialized(
                 f"AGENTCTL_WORKSPACE points at {resolved_env}, which is not initialized",
@@ -110,7 +115,7 @@ def discover(
             f"no registered workspace at or above {here}",
             "run `agentctl init` in the project root, or pass --workspace PATH",
         )
-    return WorkspaceChoice(found, "cwd" if found.root_path == here else "parent")
+    return WorkspaceChoice(found, "cwd" if same_directory(found.root_path, here) else "parent")
 
 
 def init_target(*, explicit: str | None = None, env: str | None = None, cwd: str | None = None) -> tuple[str, str]:

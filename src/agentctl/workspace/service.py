@@ -11,7 +11,7 @@ from agentctl.runtime.base import RuntimeAdapter
 from agentctl.session.worktree import repair_worktree
 from agentctl.storage import transaction
 from agentctl.storage.models import Session, Workspace
-from agentctl.workspace.resolver import WorkspaceResolver, is_inside, now
+from agentctl.workspace.resolver import WorkspaceResolver, is_inside, now, respell_under
 
 
 @dataclass(slots=True)
@@ -101,7 +101,7 @@ class WorkspaceService:
 
     def rebind(self, workspace: Workspace, new_root: str) -> Workspace:
         """Explicitly move a workspace identity to a new canonical root."""
-        other = self.store.workspaces.find_by_root(new_root)
+        other = self.resolver.find(new_root)
         if other is not None and other.id != workspace.id:
             raise UsageError(
                 f"{new_root} is already bound to workspace {other.id}",
@@ -111,7 +111,8 @@ class WorkspaceService:
         def relocate(path: str) -> str:
             if not is_inside(path, workspace.root_path):
                 return path
-            return str(Path(new_root) / Path(path).relative_to(workspace.root_path))
+            relative = Path(respell_under(path, workspace.root_path)).relative_to(workspace.root_path)
+            return str(Path(new_root) / relative)
 
         updates = []
         for session in self.store.sessions.list_for_workspace(workspace.id, include_deleted=True):
@@ -134,7 +135,7 @@ class WorkspaceService:
 
         stamp = now()
         with transaction(self.store.conn):
-            other = self.store.workspaces.find_by_root(new_root)
+            other = self.resolver.find(new_root)
             if other is not None and other.id != workspace.id:
                 raise UsageError(
                     f"{new_root} is already bound to workspace {other.id}",

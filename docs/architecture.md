@@ -159,6 +159,11 @@ leader_bindings(workspace_id PK FK, leader_id, terminal, native_session_id,
   until `rebind` says otherwise. `rebind` rewrites every stored path under the
   old root (`cwd`, `worktree_path`, `git_root`, `native_session_dir`) in one
   transaction, then repairs moved worktrees with `git worktree repair <path>`.
+  Lookup is `root_path` first, then filesystem identity `(st_dev, st_ino)`, so a
+  differently-cased spelling of a registered root (`/tmp/CaseX` for
+  `/tmp/casex`) resolves to that workspace instead of creating a second one; the
+  same identity rule backs `is_inside`, workspace discovery and stored session
+  paths, which are respelled under the registered root.
 - `sessions.id` is `sess_<uuid4hex>`, never equal to a terminal address.
 - `deleted_at` is a soft delete: history and native ids stay readable.
 - Schema version 4 drops the v0.2 tables (`messages`, `events`, `inbox`,

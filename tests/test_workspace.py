@@ -9,7 +9,24 @@ import pytest
 
 from agentctl.errors import InvalidPath, WorkspaceNotInitialized
 from agentctl.storage import Store, open_database, open_connection
-from agentctl.workspace.resolver import WorkspaceResolver, canonical, is_inside, resolve_root
+from agentctl.workspace.resolver import (
+    WorkspaceResolver,
+    canonical,
+    filesystem_identity,
+    is_inside,
+    resolve_root,
+    same_directory,
+)
+
+
+def _case_insensitive_fs(path: Path) -> bool:
+    """Whether `path` lives on a filesystem that folds name case."""
+    probe = path / "CaseProbe"
+    probe.mkdir()
+    try:
+        return os.path.samefile(probe, path / "caseprobe")
+    except OSError:
+        return False
 
 
 def test_same_path_resolves_to_same_workspace(workspace: Path) -> None:
@@ -199,3 +216,63 @@ def test_is_local_distinguishes_machine_addresses() -> None:
 
     assert make("t7").is_local is True
     assert make("boxb/t7").is_local is False
+
+
+def test_init_two_spellings_of_one_directory_share_an_identity(workspace: Path) -> None:
+    if not _case_insensitive_fs(workspace.parent):
+        pytest.skip("filesystem is case-sensitive")
+    from agentctl.workspace.service import WorkspaceService
+
+    variant = workspace.with_name(workspace.name.upper())
+    assert str(variant) != str(workspace)
+    with open_database() as conn:
+        service = WorkspaceService(Store(conn), runtime=None)
+        first, created = service.init(str(workspace))
+        second, created_again = service.init(str(variant))
+    assert created is True
+    assert created_again is False
+    assert second.id == first.id
+    assert second.leader_id == first.leader_id
+
+
+def test_discover_resolves_a_case_variant(workspace: Path) -> None:
+    if not _case_insensitive_fs(workspace.parent):
+        pytest.skip("filesystem is case-sensitive")
+    from agentctl.workspace.discovery import discover
+
+    variant = workspace.with_name(workspace.name.upper())
+    with open_database() as conn:
+        store = Store(conn)
+        registered, _ = WorkspaceResolver(store).get_or_create(str(workspace))
+        choice = discover(store, cwd=str(variant))
+    assert choice.workspace.id == registered.id
+    assert choice.source == "cwd"
+
+
+def test_validate_cwd_respells_under_the_registered_root(workspace: Path) -> None:
+    if not _case_insensitive_fs(workspace.parent):
+        pytest.skip("filesystem is case-sensitive")
+    from agentctl.session.service import SessionService
+
+    variant = workspace.with_name(workspace.name.upper())
+    sub = variant / "sub"
+    sub.mkdir()
+    with open_database() as conn:
+        store = Store(conn)
+        workspace_row, _ = WorkspaceResolver(store).get_or_create(str(workspace))
+        service = SessionService(store, runtime=None, config=None)
+        path = service.validate_cwd(workspace_row, str(sub))
+    assert path.startswith(workspace_row.root_path)
+    assert path == str(workspace / "sub")
+
+
+def test_identity_ignores_spelling_noise(workspace: Path, tmp_path: Path) -> None:
+    path = str(workspace)
+    noisy = f"{path}/./"
+    assert filesystem_identity(path) is not None
+    assert filesystem_identity(path) == filesystem_identity(noisy)
+
+    other = tmp_path / "other"
+    other.mkdir()
+    assert not same_directory(path, str(other))
+    assert not same_directory(path, str(tmp_path / "missing"))

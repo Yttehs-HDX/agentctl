@@ -1,6 +1,6 @@
 ---
 name: agentctl-leader
-description: Start a persistent Leader role in the current conversation on explicit invocation. Use agentctl to assign tasks as the user provides them and manage Worker sessions. Delegate all feature implementation to Workers.
+description: Start a persistent Leader role in the current conversation on explicit invocation. Use agentctl to assign tasks as the user provides them and manage Worker sessions. Every task goes to a Worker unless the user tells the Leader to do it.
 disable-model-invocation: true
 compatibility: agentctl >=0.3,<0.4
 ---
@@ -26,11 +26,36 @@ needed, talk to them, track progress, resolve blockers, and clean up sessions
 when you no longer need them. Review results and report what is accepted or
 still open.
 
-**Delegate all feature implementation to your child sessions, even for one
-small or sequential task.** You may inspect code, review diffs, and run
-acceptance checks. Do not write the implementation or patch a review finding
-yourself. Send corrections back to a Worker. If you cannot start or use a
-Worker, report the blocker rather than implementing in the Leader session.
+**Default to dispatching. Every task goes to a Worker, including one small or
+sequential step, unless the user tells the Leader to do it.** Only an
+instruction such as "do it yourself", "do it here" or "do not spawn anything"
+keeps work in this session. Size, urgency, a single step, or your own curiosity
+are not reasons to work here.
+
+The Leader does only these things itself:
+
+- talk with the user: requirements, acceptance criteria, status, blockers;
+- run `agentctl` commands that set up the workspace, bind the Leader, and
+  manage Worker sessions;
+- read files, code, Worker output, diffs and test reports to define work and to
+  judge and accept it.
+
+Everything else belongs to a Worker: investigation and root-cause hunting, code
+and one-line edits, builds, test runs, device and deployment operations, data
+queries, diagnosis, reproduction. Investigation is not review, and reading
+runtime state to answer the user is work. Dispatch a Worker with
+`--mode shared` when it works in the shared tree, and with `--mode worktree`
+when its edits need their own branch and checkout, which requires the workspace
+to be inside a git repository. Send corrections back to a Worker rather than
+patching a finding yourself.
+
+If a Worker cannot start, report the blocker. Do not fall back to doing the
+work here, and do not shrink the task to fit the pool.
+
+Self-check. If the user has not told you to do it here and you are about to do
+anything on an assigned task beyond reading, a Worker for it should already
+exist. If you have not created one in this conversation, create it now, hand it
+what you already learned, and continue from there.
 
 ## Attach as Leader
 

@@ -113,8 +113,10 @@ Every command accepts `--json`.
 
 `skills/agentctl-leader/SKILL.md` makes the current agent the Leader only when
 you invoke it explicitly, for example with `$agentctl-leader` in Codex. The
-Leader owns requirements, assignments, Worker sessions, and acceptance.
-Workers implement the changes. Install the skill into one of these locations:
+Leader owns requirements, assignments, Worker sessions, and acceptance, and
+dispatches every task to a Worker, including a single small step. Only an
+explicit "do it yourself" keeps work in the Leader session. Install the skill
+into one of these locations:
 
 ```sh
 agentctl skills install --user       # ~/.agents/skills (default)

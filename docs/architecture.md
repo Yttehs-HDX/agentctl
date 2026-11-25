@@ -184,7 +184,8 @@ which would kill every Worker when the Leader's terminal closes;
 The relation therefore survives for Herdr's native notes, and the Worker
 survives the Leader.
 
-Agent argv is built from the catalog entry plus the measured session-id flags:
+Each agent's argv comes from its catalog entry and the measured session-id
+flags it needs:
 
 | agent | argv today |
 | --- | --- |
@@ -273,8 +274,8 @@ action, and even then the row is soft-deleted.
   repository, so a reused session name never collides with a branch left
   behind by a kept worktree. The final ref is checked with
   `git check-ref-format` before use.
-- Deletion removes a worktree only when it is clean; uncommitted worker output
+- Deletion removes a worktree only when it is clean; uncommitted Worker output
   is project data, so the worktree is kept and the reason is recorded in the
   session's `last_error`.
-- `git branch -d` (never `-D`) drops the branch: merged work disappears, worker
+- `git branch -d` (never `-D`) drops the branch: merged work disappears, Worker
   commits survive.

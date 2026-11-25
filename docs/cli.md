@@ -137,7 +137,7 @@ agentctl --workspace PATH delete NAME [--keep-worktree]
 ```
 
 Kills the agent, removes the terminal, applies the worktree policy, and soft
-deletes the record. Never deletes worker files: a dirty worktree is kept. The
+deletes the record. Never deletes Worker files: a dirty worktree is kept. The
 returned session has `hc_terminal_id: null`, matching the stored row.
 
 ## prune

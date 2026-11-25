@@ -51,8 +51,8 @@ B(--no-parent)                     → stayed live
 ```
 
 Because the Leader often runs inside an HC terminal, **agentctl always passes
-`--no-parent`**. Otherwise every worker would die with the Leader's terminal,
-violating the product requirement that workers outlive the Leader.
+`--no-parent`**. Otherwise every Worker would die with the Leader's terminal,
+violating the product requirement that Workers outlive the Leader.
 
 ## 3. Talking to a terminal
 
@@ -159,7 +159,7 @@ Consequence for v0.1: codex sessions get `native_session_id = NULL` and
 `supports_resume = false` in the catalog, and their status is `unknown`.
 omp/pi/claude get private session directories under
 `~/.config/agentctl/sessions/<agentctl session id>/` so agentctl never has to
-guess which file belongs to which worker.
+guess which file belongs to which Worker.
 
 Caveat observed: resuming an omp session while the original process still holds
 the file makes omp fork to a new file. Recovery therefore only resumes when the

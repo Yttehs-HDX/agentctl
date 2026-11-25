@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "agentctl"
 version = "0.3.0"
-description = "A thin CLI over Herdr Core for running a pool of AI agent Workers"
+description = "A thin CLI over Herdr Core for running a pool of AI agents"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]

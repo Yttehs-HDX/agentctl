@@ -12,7 +12,7 @@ made for agents to use on themselves.
 
 Herdr already runs programs in persistent terminals, gives them parents, sends
 them messages, waits for their turns and reports their status. agentctl does not
-re-implement any of that. It adds the three things an Agent needs to run a pool
+re-implement any of that. It adds the three things an agent needs to run a pool
 of Workers without thinking about Herdr:
 
 - **a Workspace** — a canonical directory with a stable identity;
@@ -173,8 +173,8 @@ the installed skill.
 ## Security boundary
 
 `--cwd` must exist, resolve through symlinks to its real path, and stay inside
-the workspace root. Agent commands come from the catalog only. That is a scoping
-constraint, not an OS sandbox.
+the workspace root. The agent programs come from the catalog only. That is a
+scoping constraint, not an OS sandbox.
 
 ## License
 

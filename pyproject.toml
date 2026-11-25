@@ -22,6 +22,9 @@ dev = ["pytest>=8.0"]
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentctl"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"skills/agentctl-leader" = "agentctl/skills/agentctl-leader"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"

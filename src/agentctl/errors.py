@@ -145,6 +145,18 @@ class RuntimeFinished(RuntimeFailure):
     code = "runtime_finished"
 
 
+class SkillSourceMissing(AgentctlError):
+    code = "skill_source_missing"
+    exit_code = EXIT_NOT_FOUND
+
+
+class SkillTargetExists(AgentctlError):
+    """Something not created by `skills install` already occupies a target."""
+
+    code = "skill_target_exists"
+    exit_code = EXIT_CONFLICT
+
+
 class LeaderRequired(AgentctlError):
     """A command conflicts with the workspace's Leader binding."""
 

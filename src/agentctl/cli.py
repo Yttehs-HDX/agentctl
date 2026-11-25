@@ -12,6 +12,7 @@ import os
 import sys
 from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Annotated, Any, Iterator, Optional
 
 import typer
@@ -23,6 +24,7 @@ from agentctl.config import default_config, load_config, save_config
 from agentctl.config.loader import dumps
 from agentctl.config.schema import Config
 from agentctl.errors import (
+    EXIT_CONFLICT,
     AgentctlError,
     AgentUnknown,
     ConfigError,
@@ -34,6 +36,16 @@ from agentctl.leader.service import LeaderService
 from agentctl.paths import config_path
 from agentctl.runtime.herdr_core import HerdrCoreAdapter
 from agentctl.session.messaging import MessagingService
+from agentctl.skills import (
+    HARNESSES,
+    SKILL_ID,
+    Target,
+    install as install_skill,
+    source_dir,
+    status as skill_status,
+    target_dirs,
+    uninstall as uninstall_skill,
+)
 from agentctl.session.service import CreateRequest, SessionService
 from agentctl.storage import Store, open_database
 from agentctl.workspace.discovery import discover, init_target
@@ -53,6 +65,12 @@ app.add_typer(config_app, name="config")
 
 leader_app = typer.Typer(no_args_is_help=True, help="Where this workspace's Leader runs.")
 app.add_typer(leader_app, name="leader")
+
+skills_app = typer.Typer(
+    no_args_is_help=True,
+    help="Install the bundled Leader skill into agent-harness skill directories.",
+)
+app.add_typer(skills_app, name="skills")
 
 WORKSPACE_HELP = (
     "Leader workspace root. Optional: defaults to AGENTCTL_WORKSPACE, then the "
@@ -120,7 +138,7 @@ def main_callback(
     # and the flag must keep winning.
     state = State(workspace_arg=workspace or None, json=json_output)
     ctx.obj = state
-    if ctx.invoked_subcommand in {"setup", "agents", "config", "version"}:
+    if ctx.invoked_subcommand in {"setup", "agents", "config", "skills", "version"}:
         return
     try:
         state.config = load_config()
@@ -1066,6 +1084,131 @@ def _must_load_config() -> Config:
         return load_config()
     except FileNotFoundError as exc:
         raise SetupRequired("agentctl is not set up on this machine", "run `agentctl setup` once") from exc
+
+
+# ------------------------------------------------------------------------ skills
+
+HARNESS_HELP = "omp, claude, agents, or all (the default)."
+SCOPE_HELP = "Install for the current user (default)."
+PROJECT_HELP = "Install into the current directory."
+
+
+def _skill_scope(user: bool, project: bool) -> str:
+    if user and project:
+        raise UsageError("--user and --project are alternatives", "pass only one of them")
+    return "project" if project else "user"
+
+
+def _skill_selection(scope: str, harness: str) -> tuple[list[Target], str | None]:
+    if harness not in (*HARNESSES, "all"):
+        raise UsageError(
+            f"unknown harness {harness!r}",
+            f"pass --harness {'|'.join((*HARNESSES, 'all'))}",
+        )
+    note: str | None = None
+    if harness == "all":
+        names: list[str] = list(HARNESSES) if scope == "project" else ["omp", "claude"]
+        if scope == "user":
+            note = "agents has no user-level skill directory; skipped for --user"
+    elif scope == "user" and harness == "agents":
+        names = []
+        note = "agents has no user-level skill directory; nothing to do for --user"
+    else:
+        names = [harness]
+    everything = target_dirs(scope, Path.cwd(), Path.home(), os.environ)
+    return [target for target in everything if target[0] in names], note
+
+
+def _skill_payload(source, rows, note: str | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "skill": SKILL_ID,
+        "source": str(source),
+        "targets": [row.to_dict() for row in rows],
+    }
+    if note:
+        payload["note"] = note
+    return payload
+
+
+def _print_skill_rows(rows, note: str | None = None) -> None:
+    for row in rows:
+        typer.echo(f"{row.harness} ({row.scope}): {row.action} {row.path}")
+        if row.error:
+            typer.echo(f"  {row.error}", err=True)
+    if note:
+        typer.echo(f"note: {note}")
+
+
+def _print_skill_status(rows, note: str | None = None) -> None:
+    for row in rows:
+        typer.echo(f"{row.harness} ({row.scope}): {row.state} {row.path}")
+    if note:
+        typer.echo(f"note: {note}")
+
+
+def _exit_on_refusal(rows) -> None:
+    if any(row.action == "skipped" for row in rows):
+        raise typer.Exit(code=EXIT_CONFLICT)
+
+
+@skills_app.command("path")
+def skills_path(ctx: typer.Context) -> None:
+    """Print the bundled Leader skill's directory."""
+    state = _state(ctx)
+    source = source_dir()
+    state.emit({"skill": SKILL_ID, "source": str(source)}, lambda: typer.echo(str(source)))
+
+
+@skills_app.command("install")
+def skills_install(
+    ctx: typer.Context,
+    user: Annotated[bool, typer.Option("--user", help=SCOPE_HELP)] = False,
+    project: Annotated[bool, typer.Option("--project", help=PROJECT_HELP)] = False,
+    harness: Annotated[str, typer.Option("--harness", help=HARNESS_HELP)] = "all",
+    copy: Annotated[bool, typer.Option("--copy", help="Copy the directory instead of linking it.")] = False,
+    force: Annotated[bool, typer.Option("--force", help="Replace an entry agentctl did not create.")] = False,
+) -> None:
+    """Install the bundled Leader skill so a harness discovers it."""
+    state = _state(ctx)
+    scope = _skill_scope(user, project)
+    targets, note = _skill_selection(scope, harness)
+    source = source_dir()
+    rows = install_skill(targets, copy=copy, force=force)
+    state.emit(_skill_payload(source, rows, note), lambda: _print_skill_rows(rows, note))
+    _exit_on_refusal(rows)
+
+
+@skills_app.command("status")
+def skills_status(
+    ctx: typer.Context,
+    user: Annotated[bool, typer.Option("--user", help=SCOPE_HELP)] = False,
+    project: Annotated[bool, typer.Option("--project", help=PROJECT_HELP)] = False,
+    harness: Annotated[str, typer.Option("--harness", help=HARNESS_HELP)] = "all",
+) -> None:
+    """Report each target as linked, copied, missing, or foreign."""
+    state = _state(ctx)
+    scope = _skill_scope(user, project)
+    targets, note = _skill_selection(scope, harness)
+    source = source_dir()
+    rows = skill_status(targets)
+    state.emit(_skill_payload(source, rows, note), lambda: _print_skill_status(rows, note))
+
+
+@skills_app.command("uninstall")
+def skills_uninstall(
+    ctx: typer.Context,
+    user: Annotated[bool, typer.Option("--user", help=SCOPE_HELP)] = False,
+    project: Annotated[bool, typer.Option("--project", help=PROJECT_HELP)] = False,
+    harness: Annotated[str, typer.Option("--harness", help=HARNESS_HELP)] = "all",
+) -> None:
+    """Remove only skill entries agentctl created."""
+    state = _state(ctx)
+    scope = _skill_scope(user, project)
+    targets, note = _skill_selection(scope, harness)
+    source = source_dir()
+    rows = uninstall_skill(targets)
+    state.emit(_skill_payload(source, rows, note), lambda: _print_skill_rows(rows, note))
+    _exit_on_refusal(rows)
 
 
 # ----------------------------------------------------------------------- version

@@ -64,11 +64,35 @@ agentctl send researcher -- '--json'
 One Worker runs one message at a time; its harness owns the queue. agentctl
 keeps no queue, no message ids and no acks, so nothing retries for you.
 
-## Wait with the right scope
+## Start an asynchronous wait after dispatch
+
+**If you need to act on a Worker's result, start an asynchronous wait as
+soon as you dispatch the work.** Use your own agent harness's background
+tool to run:
+
+```sh
+agentctl --json wait --any
+```
+
+Use a tool that returns the result to you or gives you a handle to collect it.
+Do not use a detached shell command with `&` and no way to receive its output.
+Keep one wait active per workspace while results are outstanding. Keep working
+while it runs. If the tool gives you a handle rather than a notification,
+collect the result before ending your turn.
+
+Read `children` in the result, even on a timeout. Use `agentctl read NAME`
+to inspect a Worker that ended its turn. A turn ending does not prove the
+task succeeded. If Workers still owe results, start the next asynchronous
+wait. A timeout is a check-in, not a failure.
+
+If your harness cannot run and collect a background command, run the wait
+in the foreground when you have no other work. Herdr does not wake an idle
+Leader for an ordinary turn end on its own (issue #176).
+
+## Choose the wait scope
 
 ```sh
 agentctl wait researcher --timeout 180
-agentctl wait --any
 agentctl wait --all
 ```
 
@@ -76,16 +100,8 @@ agentctl wait --all
 workspace. Workers from an earlier Leader, or created with no Leader attached,
 are invisible to them; use `wait NAME` for those.
 
-`wait` occupies the calling process until a turn ends or `--timeout` expires, so
-do not spend your only loop on it. Start it in your harness's background shell,
-or hand it to a subagent that reports back, and keep working. A timeout is exit
-0 with `check_in: true`, not a failure.
-
 `wait NAME` returns at once when that Worker is already idle. It waits for a
 turn to finish, not for new work; use `status NAME` to read the state.
-
-A Worker that ends a turn without reporting does not wake an idle Leader (Herdr
-issue #176). Nothing is lost, so call `wait --any` when you need the news.
 
 ## Treat status and output as facts
 

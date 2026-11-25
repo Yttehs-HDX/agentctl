@@ -29,6 +29,7 @@ Herdr Core.
 | `test_cli.py` | JSON envelope and schema, `--json` argv handling, usage errors |
 | `test_discovery.py` | workspace auto-detection: precedence, nesting, symlinks, failures |
 | `test_leader.py` | binding: attach, refusal, Worker takeover guard, staleness from Herdr |
+| `test_docs.py` | every registered CLI command has a `##` section in `docs/cli.md` |
 `conftest.py` supplies:
 
 - `isolated_home` (autouse) — temporary `AGENTCTL_HOME`.

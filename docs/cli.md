@@ -215,6 +215,120 @@ finished terminal is an error. `--wait` asks Herdr to wait for the turn the send
 started. `started: false` in the output means the text was typed but no turn
 began, which is a doubt rather than a success.
 
+## keys
+
+```text
+agentctl keys NAME KEY [KEY ...]
+```
+
+Sends one or more named keys to a session in a single Herdr call, so a dialog
+that needs a sequence (`down`, `enter`) is answered without another call in
+between. Key names are Herdr's: `enter`, `esc`, `tab`, `down`, `ctrl+c`, `f5`,
+or a single letter. At least one name is required, and a name starting with `-`
+is refused as a usage error, exit 2, so a mistyped option never becomes a
+keystroke. Keys go only to a live terminal; a finished one fails with exit 7
+and the hint to delete and recreate the session, and a missing one points at
+`agentctl recover`.
+
+JSON payload: `session`, `terminal`, `status` (as Herdr reports it after the
+keys), `turn`. Human output is `sent keys to NAME (turn N)`.
+
+## interrupt
+
+```text
+agentctl interrupt NAME [--timeout S]
+```
+
+Sends ctrl+c to the session's terminal, the same key a person would press.
+
+- `--timeout S` — seconds to wait for the interrupt to land. Passed through as
+  `hc interrupt --timeout`, and omitted entirely when not given.
+
+A finished terminal is refused like `keys`, exit 7. JSON payload: `session`,
+`terminal`, `key` (`ctrl+c` when Herdr reports it, `null` otherwise), `outcome`
+(Herdr's word, for example `interrupted`). Human output is
+`NAME: KEY -> OUTCOME`, with `-` standing in for a missing part.
+
+## read
+
+```text
+agentctl read NAME [--lines N] [--follow]
+```
+
+Prints the session's screen plus history above it.
+
+- `--lines N` — history lines above the screen. Default 50.
+- `--follow` — keep printing while the output changes, one snapshot at a time
+  separated by a blank line, until the session stops being live. ctrl+c ends it
+  without an error.
+
+`--follow` with `--json` is a usage error, exit 2: a stream has no single JSON
+document. Output of a finished terminal is still readable; only sending needs
+it live, so `read` after `wait` returns normally.
+
+Herdr returns scrollback only when it has it. When the history is unavailable
+the command still prints the screen and exits 0, and the human output adds
+`[agentctl] partial: screen only (<reason>)` on stderr. JSON payload: `text`,
+`complete` (whether the requested history is included), `how` (where the text
+came from, `screen` when Herdr omits it), `why` (`null`, or the reason the
+result is partial).
+
+## status
+
+```text
+agentctl status [NAME] [--no-refresh]
+```
+
+One session's status, or the whole workspace's when NAME is omitted.
+
+Each status is re-derived from the runtime first: the terminal is located by
+its stored address and then by label, and the status is read from it. With no
+NAME the command does this for every live session of the workspace and prints
+the same table as `list`.
+
+- `--no-refresh` — skip the runtime refresh and report the stored rows. It is
+  the difference between one Herdr call and N, and the way to see what the
+  registry believes while the runtime is unreachable.
+
+When the refresh cannot locate a terminal, the session is reported as
+`unknown` with the reason, and `recover` is the command that tries to attach or
+relaunch it.
+
+JSON payload: for one session `{"session": {...}}`; for the workspace
+`{"workspace_id": ..., "sessions": [...]}`. Human output for one session is
+`NAME: STATUS`, with the last error in parentheses when there is one.
+
+## recover
+
+```text
+agentctl recover [NAME]
+```
+
+Re-attaches a session to its Herdr terminal, or relaunches it. Without NAME
+every live session recorded for the workspace is examined; with NAME only that
+one is.
+
+For each session:
+
+- A live local terminal carrying this workspace's and session's labels is
+  adopted, even when its address differs from the stored one, and the row is
+  updated to match. Result `attached`.
+- With no live terminal the agent is relaunched with its resume flag and the
+  native session id, plus the native session directory for agents that store
+  sessions by directory. Result `resumed`, status `starting`, then re-derived
+  once so a process that exits immediately is reported failed rather than
+  resumed.
+- With no supported resume path (unknown agent, no resume flag, or no native
+  id) the session is marked `unreachable` with that reason. Result
+  `unrecoverable`.
+
+Only local terminals are adopted. Herdr addresses a remote one as `machine/t7`,
+and typing into another machine's terminal would be worse than a relaunch. A
+name that matches no live session is a not-found error, exit 3.
+
+JSON payload: `workspace_id` and `results`, each entry with `session`, `id`,
+`result` and `status`. Human output is `NAME: RESULT (STATUS)`.
+
 ## agents
 
 ```text

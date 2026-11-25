@@ -1,6 +1,7 @@
 # agentctl
 
 <p>
+  <a href="https://github.com/Yttehs-HDX/agentctl/actions/workflows/ci.yml"><img alt="tests" src="https://img.shields.io/github/actions/workflow/status/Yttehs-HDX/agentctl/ci.yml?style=for-the-badge&label=tests&branch=main"></a>
   <a href="https://github.com/Yttehs-HDX/agentctl/releases"><img alt="release" src="https://img.shields.io/badge/release-v0.3.0-blue?style=for-the-badge"></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-blue?style=for-the-badge"></a>
   <a href="pyproject.toml"><img alt="python" src="https://img.shields.io/badge/python-3.11%2B-3776AB?style=for-the-badge"></a>

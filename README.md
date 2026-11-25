@@ -27,13 +27,18 @@ uv tool install --from . agentctl      # or: uv pip install -e .
 agentctl setup                          # checks hc, detects agents, writes config.toml
 ```
 
-State lives in `~/.config/agentctl/` (`AGENTCTL_HOME` overrides):
+State lives in `~/.config/agentctl/` (`AGENTCTL_HOME` overrides it and must be
+an absolute path):
 
 ```text
 config.toml     # global configuration (TOML)
 registry.db     # workspaces, sessions, the Leader binding (SQLite, WAL)
 sessions/       # per-session private dirs for agents that key sessions by directory
 ```
+
+On Windows config and state split: `config.toml` lives under `%APPDATA%\agentctl`
+and `registry.db` plus `sessions\` under `%LOCALAPPDATA%\agentctl`.
+`AGENTCTL_HOME` overrides both.
 
 ## Quick start
 

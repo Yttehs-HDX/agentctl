@@ -30,9 +30,12 @@ def test_list_specs_reports_installed_state(monkeypatch: pytest.MonkeyPatch) -> 
 def test_configured_command_is_the_one_checked(monkeypatch: pytest.MonkeyPatch) -> None:
     """A user override is what runs, so it is what must exist on PATH."""
     import shutil as shutil_module
+    import sys
 
+    # An executable that exists here, under a name that is not the agent id:
+    # resolve must pass only if the override's own path is what got checked.
     config = default_config()
-    config.agents["claude"].command = ["/bin/echo"]
+    config.agents["claude"].command = [sys.executable]
     real_which = shutil_module.which
     monkeypatch.setattr(
         shutil_module,
@@ -40,7 +43,7 @@ def test_configured_command_is_the_one_checked(monkeypatch: pytest.MonkeyPatch) 
         lambda name, *args, **kwargs: None if name == "claude" else real_which(name, *args, **kwargs),
     )
     spec = resolve(config, "claude")
-    assert spec.command == ["/bin/echo"]
+    assert spec.command == [sys.executable]
 
 
 def test_unknown_agent_is_rejected() -> None:

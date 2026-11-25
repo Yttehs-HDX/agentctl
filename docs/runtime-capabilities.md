@@ -1,9 +1,8 @@
 # Herdr Core runtime capabilities
 
-Measured on this machine against **hc 0.1.18** (installed by nix, core
-`shetty-laptop`). Everything below was executed in a scratch core
-(`HC_SESSION=lab`, dedicated `XDG_*`), not against the user's live terminals.
-Anything not reproduced is marked **[UNVERIFIED]**.
+Measured against **hc 0.1.18** (installed by nix). Everything below was
+executed in a scratch core (`HC_SESSION=lab`, dedicated `XDG_*`), not against
+live terminals. Anything not reproduced is marked **[UNVERIFIED]**.
 
 ## 1. Command surface
 

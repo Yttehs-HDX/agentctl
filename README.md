@@ -7,8 +7,8 @@
   <a href="https://github.com/herdrdev/herdr-core"><img alt="herdr-core" src="https://img.shields.io/badge/herdr--core-0.1.18-orange?style=for-the-badge"></a>
 </p>
 
-A thin convenience CLI over [Herdr Core](https://github.com/herdrdev/herdr-core)
-(`hc`), made for Agents to use on themselves.
+A thin CLI over [Herdr Core](https://github.com/herdrdev/herdr-core) (`hc`),
+made for agents to use on themselves.
 
 Herdr already runs programs in persistent terminals, gives them parents, sends
 them messages, waits for their turns and reports their status. agentctl does not

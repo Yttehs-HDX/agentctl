@@ -19,7 +19,6 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "agentctl-home"
     home.mkdir()
     monkeypatch.setenv("AGENTCTL_HOME", str(home))
-    monkeypatch.delenv("AGENTCTL_JSON", raising=False)
     monkeypatch.delenv("AGENTCTL_WORKSPACE", raising=False)
     monkeypatch.delenv("HC_TERMINAL_ID", raising=False)
     return home

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 import sys
 
 import pytest
@@ -60,12 +59,8 @@ def test_session_dict_exposes_worktree_identity() -> None:
 
 def test_json_usage_error_is_machine_readable(monkeypatch, capsys) -> None:
     monkeypatch.setattr(sys, "argv", ["agentctl", "--json", "send"])
-    monkeypatch.delenv("AGENTCTL_JSON", raising=False)
-    try:
-        with pytest.raises(SystemExit) as exc:
-            cli.main()
-    finally:
-        os.environ.pop("AGENTCTL_JSON", None)
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
     assert exc.value.code == 2
     body = json.loads(capsys.readouterr().err)
     assert body["schema"] == 1
@@ -78,3 +73,79 @@ def test_json_help_still_exits_zero(monkeypatch) -> None:
     with pytest.raises(SystemExit) as exc:
         cli.main()
     assert exc.value.code == 0
+
+
+def test_json_after_terminator_stays_human(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["agentctl", "send", "x", "--", "--json"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 4
+    stderr = capsys.readouterr().err
+    assert stderr.startswith("error: ")
+    assert not stderr.startswith("{")
+
+
+def test_json_before_the_command_still_emits_the_envelope(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["agentctl", "--json", "status", "x"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 4
+    body = json.loads(capsys.readouterr().err)
+    assert body["schema"] == 1
+    assert body["error"]["code"] == "setup_required"
+
+
+def _setup_payload(version_verified) -> dict:
+    return {
+        "config": "/tmp/config.toml",
+        "runtime": {"installed": True, "version": "0.1.22"},
+        "agents": [
+            {
+                "id": "claude",
+                "command": ["claude"],
+                "installed": True,
+                "version": "1.0.0",
+                "version_verified": version_verified,
+                "enabled": True,
+                "integration": True,
+            }
+        ],
+        "default_agent": None,
+    }
+
+
+@pytest.mark.parametrize(
+    ("version_verified", "expected", "absent"),
+    [
+        (True, "installed", ("(unverified)", "(unmeasured)")),
+        (False, "installed (unverified)", ("(unmeasured)",)),
+        (None, "installed (unmeasured)", ("(unverified)",)),
+    ],
+)
+def test_print_setup_distinguishes_verification(
+    version_verified, expected, absent, capsys
+) -> None:
+    cli._print_setup(_setup_payload(version_verified))
+    stdout = capsys.readouterr().out
+    assert expected in stdout
+    for marker in absent:
+        assert marker not in stdout
+
+
+def test_print_setup_leaves_missing_agents_unqualified(capsys) -> None:
+    payload = _setup_payload(None)
+    payload["agents"][0]["installed"] = False
+    payload["agents"][0]["version"] = None
+    cli._print_setup(payload)
+    stdout = capsys.readouterr().out
+    assert "missing" in stdout
+    assert "(unmeasured)" not in stdout
+    assert "(unverified)" not in stdout
+
+
+def test_agents_inspect_unknown_id_fails(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(sys, "argv", ["agentctl", "agents", "inspect", "nope"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 6
+    assert "nope" in capsys.readouterr().err

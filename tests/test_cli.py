@@ -165,3 +165,20 @@ def test_json_usage_error_survives_a_narrow_terminal(monkeypatch, capsys) -> Non
     assert exc.value.code == 2
     body = json.loads(capsys.readouterr().err)
     assert body["error"]["message"] == "Missing argument 'session'."
+
+
+def test_json_usage_error_survives_forced_color(monkeypatch, capsys) -> None:
+    """typer forces color on under `GITHUB_ACTIONS`, wrapping every `│`.
+
+    The panel's content line then starts with `\\x1b[31m│`, so a `startswith`
+    check on the border character misses it and the parser falls back to the
+    usage line.
+    """
+    monkeypatch.delenv("COLUMNS", raising=False)
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setattr(sys, "argv", ["agentctl", "--json", "send"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 2
+    body = json.loads(capsys.readouterr().err)
+    assert body["error"]["message"] == "Missing argument 'session'."

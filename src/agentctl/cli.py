@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json as jsonlib
 import os
+import re
 import sys
 from contextlib import contextmanager, redirect_stderr
 from dataclasses import dataclass
@@ -1247,16 +1248,24 @@ def main() -> None:
         _print_error(AgentctlError(str(exc) or type(exc).__name__), json_mode)
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
 def _panel_message(lines: list[str]) -> str | None:
     """The reason inside Click's `╭─ Error ─╮` panel, joined across wraps.
 
     The panel draws with `│` on both sides. A header line carries `─`, a border
     line carries `╭` or `╰`. Everything else is the message, which may span
     several lines when the terminal is narrow.
+
+    typer forces color on when it sees `GITHUB_ACTIONS`, which puts an escape
+    sequence before every `│`, so the line no longer starts with the border
+    character. Strip the sequences first.
     """
     inside = False
     parts: list[str] = []
     for line in lines:
+        line = _ANSI.sub("", line)
         if "─" in line and "│" not in line:
             inside = "Error" in line
             continue

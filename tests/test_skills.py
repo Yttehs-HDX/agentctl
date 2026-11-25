@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 from pathlib import Path
 
@@ -20,6 +21,15 @@ runner = CliRunner()
 # exists. Pin a width wide enough to keep every name whole, so the assertion
 # tests the CLI surface and not the runner's screen.
 _WIDE = {"COLUMNS": "200"}
+
+# Under `GITHUB_ACTIONS`, typer forces color on, and rich then splits an option
+# name across escape sequences (`\x1b[1m--\x1b[0m\x1b[1mname`). A plain
+# substring test fails on output that a human reads correctly.
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _visible(text: str) -> str:
+    return _ANSI.sub("", text)
 
 
 def _frontmatter(text: str) -> dict[str, str]:
@@ -287,6 +297,6 @@ def test_every_skill_command_and_option_exists_in_the_cli() -> None:
         assert result.exit_code == 0, f"{line}\n{result.output}"
         for option in options:
             if option in _GLOBAL_WITH_VALUE or option in _GLOBAL_FLAGS:
-                assert option in root.stdout, f"{option} missing from root help ({line})"
+                assert option in _visible(root.stdout), f"{option} missing from root help ({line})"
             else:
-                assert option in result.stdout, f"{option} missing from {' '.join(command)} help ({line})"
+                assert option in _visible(result.stdout), f"{option} missing from {' '.join(command)} help ({line})"

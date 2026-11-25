@@ -29,10 +29,25 @@ Workspace (canonical dir) ── Leader identity (stable UUID)
 
 ## Install
 
+Herdr Core comes first. agentctl drives `hc`; it does not ship it.
+
+```sh
+curl -fsSL https://releases.herdr.dev/core/install.sh | sh          # Linux, macOS
+```
+
+```powershell
+powershell -c "irm https://releases.herdr.dev/core/install.ps1 | iex"   # Windows
+```
+
+Then the CLI. `uv tool install` puts `agentctl` on your PATH:
+
 ```sh
 uv tool install --from . agentctl      # or: uv pip install -e .
 agentctl setup                          # checks hc, detects agents, writes config.toml
 ```
+
+`setup` reports `herdr core: MISSING` and exits 0 when `hc` is absent, so run it
+once and read the first line.
 
 State lives in `~/.config/agentctl/` (`AGENTCTL_HOME` overrides it and must be
 an absolute path):

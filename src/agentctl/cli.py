@@ -24,6 +24,7 @@ from agentctl.config.loader import dumps
 from agentctl.config.schema import Config
 from agentctl.errors import (
     AgentctlError,
+    AgentUnknown,
     ConfigError,
     LeaderRequired,
     SetupRequired,
@@ -117,7 +118,7 @@ def main_callback(
     # `--workspace` is kept separate from AGENTCTL_WORKSPACE: discovery needs to
     # tell an explicit flag from an environment default for its `source` field,
     # and the flag must keep winning.
-    state = State(workspace_arg=workspace or None, json=_json_requested(json_output))
+    state = State(workspace_arg=workspace or None, json=json_output)
     ctx.obj = state
     if ctx.invoked_subcommand in {"setup", "agents", "config", "version"}:
         return
@@ -129,15 +130,6 @@ def main_callback(
         )
     except ConfigError as exc:
         state.config_error = exc
-
-
-def _json_requested(callback_value: bool) -> bool:
-    """`--json` works both before and after the subcommand.
-
-    `main()` hoists every occurrence to the front of argv and exports
-    AGENTCTL_JSON, because Typer parses callback options before the command.
-    """
-    return callback_value or os.environ.get("AGENTCTL_JSON") == "1"
 
 
 @contextmanager
@@ -274,8 +266,10 @@ def _print_setup(payload: dict[str, Any]) -> None:
     typer.echo(f"{'agent':<10}{'status':<24}{'status words':<14}command")
     for row in payload["agents"]:
         status = "installed" if row["installed"] else "missing"
-        if row["version_verified"] is False:
+        if row["installed"] and row["version_verified"] is False:
             status += " (unverified)"
+        elif row["installed"] and row["version_verified"] is None:
+            status += " (unmeasured)"
         if not row["enabled"]:
             status += " (off)"
         word = "reports" if row["integration"] else "none"
@@ -943,6 +937,11 @@ def agents_inspect(
     config = _config_or_default()
     definition = _definition(agent_id)
     entry = config.agents.get(agent_id)
+    if entry is None and definition is None:
+        raise AgentUnknown(
+            f"agent {agent_id!r} is not in the catalog",
+            "run `agentctl agents list` to see configured agents",
+        )
     command = entry.command if entry else (definition.command if definition else None)
     installed_version = agent_version(definition) if definition else None
     payload = {
@@ -1122,7 +1121,7 @@ def main() -> None:
         else:
             app()
     except AgentctlError as exc:
-        _print_error(exc)
+        _print_error(exc, json_mode)
     except typer.Exit:
         raise
     except Exception as exc:  # noqa: BLE001 - one envelope for every failure
@@ -1132,7 +1131,7 @@ def main() -> None:
         # status and wrap everything else as a generic error.
         if isinstance(exc, SystemExit):
             raise
-        _print_error(AgentctlError(str(exc) or type(exc).__name__))
+        _print_error(AgentctlError(str(exc) or type(exc).__name__), json_mode)
 
 
 def _print_usage_error(text: str) -> None:
@@ -1158,8 +1157,8 @@ def _print_usage_error(text: str) -> None:
     typer.echo(jsonlib.dumps(body, indent=2), err=True)
 
 
-def _print_error(exc: AgentctlError) -> None:
-    if os.environ.get("AGENTCTL_JSON") == "1" or "--json" in sys.argv:
+def _print_error(exc: AgentctlError, json_output: bool) -> None:
+    if json_output:
         typer.echo(jsonlib.dumps(exc.to_dict(), indent=2), err=True)
     else:
         typer.echo(f"error: {exc.message}", err=True)

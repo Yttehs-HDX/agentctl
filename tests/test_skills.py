@@ -66,6 +66,8 @@ def test_install_copy_creates_a_directory(tmp_path, source) -> None:
     assert skills.install(path, source, copy=True).action == "created"
     assert path.is_dir() and not path.is_symlink()
     assert (path / "SKILL.md").read_bytes() == (source / "SKILL.md").read_bytes()
+    policy = Path("agents/openai.yaml")
+    assert (path / policy).read_bytes() == (source / policy).read_bytes()
 
 
 def test_install_refuses_foreign_directory_then_force_replaces_it(tmp_path, source) -> None:
@@ -112,6 +114,17 @@ def test_uninstall_refuses_a_foreign_directory(tmp_path, source) -> None:
     assert refused.action == "skipped"
     assert refused.error is not None and str(path) in refused.error
     assert (path / "other.txt").is_file()
+
+
+def test_uninstall_leaves_a_copy_with_extra_nested_content(tmp_path, source) -> None:
+    path = _target(tmp_path)
+    skills.install(path, source, copy=True)
+    notes = path / "agents" / "notes.txt"
+    notes.write_text("someone else's notes")
+
+    assert skills.status(path, source) == "foreign"
+    assert skills.uninstall(path, source).action == "skipped"
+    assert notes.read_text() == "someone else's notes"
 
 
 def test_status_reports_each_state(tmp_path, source) -> None:

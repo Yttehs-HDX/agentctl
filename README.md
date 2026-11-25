@@ -111,9 +111,10 @@ Every command accepts `--json`.
 
 ## Teaching an agent
 
-`skills/agentctl-leader/SKILL.md` is the Leader skill: when a pool earns its
-cost, how to create, message and wait on Workers, and which exit codes need a
-person. Install it into one of these locations:
+`skills/agentctl-leader/SKILL.md` makes the current agent the Leader only when
+you invoke it explicitly, for example with `$agentctl-leader` in Codex. The
+Leader owns requirements, assignments, Worker sessions, and acceptance.
+Workers implement the changes. Install the skill into one of these locations:
 
 ```sh
 agentctl skills install --user       # ~/.agents/skills (default)

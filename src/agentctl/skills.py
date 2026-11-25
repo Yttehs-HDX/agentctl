@@ -133,14 +133,21 @@ def _inside_source(path: Path, source: Path) -> bool:
 
 
 def _is_our_copy(path: Path, source: Path) -> bool:
-    """A directory whose only entry is a SKILL.md identical to the source's."""
+    """Recognize a copy only when its entire tree matches the source."""
     try:
-        entries = sorted(entry.name for entry in path.iterdir())
+        return _same_tree(path, source)
     except OSError:
         return False
-    if entries != [SKILL_FILE]:
+
+
+def _same_tree(path: Path, source: Path) -> bool:
+    if path.is_symlink() or source.is_symlink():
         return False
-    try:
-        return (path / SKILL_FILE).read_bytes() == (source / SKILL_FILE).read_bytes()
-    except OSError:
-        return False
+    if source.is_dir():
+        if not path.is_dir():
+            return False
+        entries = {entry.name for entry in source.iterdir()}
+        return entries == {entry.name for entry in path.iterdir()} and all(
+            _same_tree(path / name, source / name) for name in entries
+        )
+    return source.is_file() and path.is_file() and path.read_bytes() == source.read_bytes()

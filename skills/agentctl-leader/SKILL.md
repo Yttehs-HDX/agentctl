@@ -1,28 +1,35 @@
 ---
 name: agentctl-leader
-description: Run a pool of long-lived Worker agents through agentctl. Use when a task splits into independent agent roles (research, review, tests), or when work must outlive the current turn. Not for one sequential task.
+description: Explicit user invocation only. Make the current agent the Leader for requirements, task assignment, Worker sessions, and acceptance. Delegate all feature implementation to child sessions.
+disable-model-invocation: true
 compatibility: agentctl >=0.3,<0.4
 ---
 
-# Leading Workers with agentctl
+# Lead a project with agentctl
 
-agentctl gives you named Worker sessions in Herdr terminals and a registry that
-survives your own restart. You decide what each Worker does. The CLI types text,
-refuses a blocked agent, and reports whether a turn started.
+Activate this mode only when the user explicitly invokes this skill. Do not
+enter Leader mode merely because a task is large or could be delegated.
 
-## Decide before you spawn
+## Own the requirements, not the implementation
 
-A pool earns its cost when work splits into independent roles, a role needs its
-own files, or you must keep working while a Worker runs. For one sequential
-task, do it yourself. A Worker adds a boot cost and a second context to read.
+You are the Leader in the current session. Clarify requirements with the user,
+define acceptance criteria, and decide what to assign and in what order. Manage
+your child sessions through agentctl: assign owners, track progress, resolve
+blockers, review results against the criteria, and report what is accepted or
+still open.
+
+**Delegate all feature implementation to your child sessions, even for one
+small or sequential task.** You may inspect code, review diffs, and run
+acceptance checks. Do not write the implementation or patch a review finding
+yourself. Send corrections back to a Worker. If you cannot start or use a
+Worker, report the blocker rather than implementing in the Leader session.
 
 ## Start
 
 ```sh
 agentctl info
 agentctl leader attach
-agentctl create --name researcher --agent omp --cwd docs --task "Map the module layout"
-agentctl create --name reviewer --agent claude --cwd . --mode worktree
+agentctl create --name implementer --cwd . --mode worktree
 ```
 
 - `info` exits 4 when the workspace is not initialized; run `agentctl init` once
@@ -32,19 +39,24 @@ agentctl create --name reviewer --agent claude --cwd . --mode worktree
 - `--cwd` must be the workspace root or below it. Subdirectories are fine. The
   stored path uses the registered spelling.
 - `--mode worktree` gives the Worker its own branch and checkout under
-  `<workspace>/.agentctl/worktrees/<session id>`. Use it whenever you and the
-  Worker may write files. `shared` means one tree for everyone.
+  `<workspace>/.agentctl/worktrees/<session id>`. Use it for implementation
+  Workers so their edits stay separate. `shared` means one tree for everyone.
 - `--task` is the first message at launch, so a booting agent cannot drop it.
   `--wait 45` waits for the first status report; `ready: no` means it has not
   reported yet.
 
 ## Dispatch and keep working
 
+Give each Worker a concrete outcome, the files or area it owns, constraints,
+and checks that determine acceptance. Ask it to report changes, check results,
+and blockers. Keep one owner per write scope and reuse an existing Worker for
+follow-up on its assignment.
+
 ```sh
-agentctl --json send researcher "Focus on the parser only"
-agentctl read researcher --lines 40
-agentctl keys researcher enter
-agentctl interrupt researcher
+agentctl --json send implementer "Implement the parser change. Own the parser and its tests. Report the diff, test results, and blockers."
+agentctl read implementer --lines 40
+agentctl keys implementer enter
+agentctl interrupt implementer
 ```
 
 Read `started` in the reply. `true` began a turn, `false` means the text was
@@ -58,7 +70,7 @@ message that itself reads as `--json` needs the terminator, or `--json` becomes
 an output flag:
 
 ```sh
-agentctl send researcher -- '--json'
+agentctl send implementer -- '--json'
 ```
 
 One Worker runs one message at a time; its harness owns the queue. agentctl
@@ -92,7 +104,7 @@ Leader for an ordinary turn end on its own (issue #176).
 ## Choose the wait scope
 
 ```sh
-agentctl wait researcher --timeout 180
+agentctl wait implementer --timeout 180
 agentctl wait --all
 ```
 
@@ -117,7 +129,7 @@ no forwarding, unless the user asked.
 ## Finish and recover
 
 ```sh
-agentctl delete reviewer
+agentctl delete implementer
 agentctl prune --dry-run
 agentctl prune
 agentctl leader detach

@@ -1,16 +1,14 @@
-"""Install the bundled Leader skill into agent-harness skill directories.
+"""Install the bundled Leader skill into the user or project skill directory.
 
 The skill lives in the checkout at `skills/agentctl-leader/` and is shipped
-inside the wheel as `agentctl/skills/agentctl-leader/`. One directory per
-(harness, scope) target, linked by default so an edit in the source is visible
-without reinstalling.
+inside the wheel as `agentctl/skills/agentctl-leader/`. The target is linked to
+the source by default.
 """
 
 from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,36 +18,11 @@ from agentctl.errors import SkillSourceMissing, SkillTargetExists
 SKILL_ID = "agentctl-leader"
 SKILL_FILE = "SKILL.md"
 
-SCOPES = ("user", "project")
-HARNESSES = ("omp", "claude", "agents")
-
-Target = tuple[str, str, str]
-
 
 @dataclass(slots=True)
 class InstallResult:
-    harness: str
-    scope: str
-    path: str
     action: str
     error: str | None = None
-
-    def to_dict(self) -> dict[str, str]:
-        body = {"harness": self.harness, "scope": self.scope, "path": self.path, "action": self.action}
-        if self.error:
-            body["error"] = self.error
-        return body
-
-
-@dataclass(slots=True)
-class StatusResult:
-    harness: str
-    scope: str
-    path: str
-    state: str
-
-    def to_dict(self) -> dict[str, str]:
-        return {"harness": self.harness, "scope": self.scope, "path": self.path, "state": self.state}
 
 
 def source_dir() -> Path:
@@ -66,71 +39,26 @@ def source_dir() -> Path:
     )
 
 
-def target_dirs(
-    scope: str,
-    cwd: Path,
-    home: Path,
-    env: Mapping[str, str],
-) -> list[Target]:
-    """Every target for `scope`, in harness order.
-
-    The neutral `agents` layout is project-only, so `scope="user"` omits it.
-    """
-    if scope == "project":
-        return [
-            ("omp", scope, str(cwd / ".omp" / "skills" / SKILL_ID)),
-            ("claude", scope, str(cwd / ".claude" / "skills" / SKILL_ID)),
-            ("agents", scope, str(cwd / ".agents" / "skills" / SKILL_ID)),
-        ]
-    if scope == "user":
-        profile = env.get("OMP_PROFILE")
-        if profile:
-            omp = home / ".omp" / "profiles" / profile / "agent" / "skills" / SKILL_ID
-        else:
-            omp = home / ".omp" / "agent" / "skills" / SKILL_ID
-        return [
-            ("omp", scope, str(omp)),
-            ("claude", scope, str(home / ".claude" / "skills" / SKILL_ID)),
-        ]
-    raise ValueError(f"unknown scope {scope!r}; expected one of {', '.join(SCOPES)}")
-
-
 def install(
-    targets: Sequence[Target],
+    path: Path,
+    source: Path,
     *,
     copy: bool = False,
     force: bool = False,
-) -> list[InstallResult]:
-    """Create or replace each target. A refusal does not stop the others."""
-    source = source_dir()
-    results: list[InstallResult] = []
-    for harness, scope, raw_path in targets:
-        path = Path(raw_path)
-        try:
-            action = _install_one(path, source, copy=copy, force=force)
-            results.append(InstallResult(harness, scope, str(path), action))
-        except SkillTargetExists as exc:
-            results.append(InstallResult(harness, scope, str(path), "skipped", exc.message))
-    return results
+) -> InstallResult:
+    """Create or replace the target."""
+    try:
+        return InstallResult(_install_one(path, source, copy=copy, force=force))
+    except SkillTargetExists as exc:
+        return InstallResult("skipped", exc.message)
 
 
-def status(targets: Sequence[Target]) -> list[StatusResult]:
-    source = source_dir()
-    return [StatusResult(harness, scope, path, _classify(Path(path), source)) for harness, scope, path in targets]
-
-
-def uninstall(targets: Sequence[Target]) -> list[InstallResult]:
-    """Remove only entries this module would have created."""
-    source = source_dir()
-    results: list[InstallResult] = []
-    for harness, scope, raw_path in targets:
-        path = Path(raw_path)
-        try:
-            action = _uninstall_one(path, source)
-            results.append(InstallResult(harness, scope, str(path), action))
-        except SkillTargetExists as exc:
-            results.append(InstallResult(harness, scope, str(path), "skipped", exc.message))
-    return results
+def uninstall(path: Path, source: Path) -> InstallResult:
+    """Remove only an entry this module would have created."""
+    try:
+        return InstallResult(_uninstall_one(path, source))
+    except SkillTargetExists as exc:
+        return InstallResult("skipped", exc.message)
 
 
 def _install_one(path: Path, source: Path, *, copy: bool, force: bool) -> str:
@@ -164,7 +92,7 @@ def _uninstall_one(path: Path, source: Path) -> str:
     )
 
 
-def _classify(path: Path, source: Path) -> str:
+def status(path: Path, source: Path) -> str:
     if not path.exists() and not path.is_symlink():
         return "missing"
     if path.is_symlink():

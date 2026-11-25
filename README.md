@@ -113,19 +113,19 @@ Every command accepts `--json`.
 
 `skills/agentctl-leader/SKILL.md` is the Leader skill: when a pool earns its
 cost, how to create, message and wait on Workers, and which exit codes need a
-person. Install it where a harness looks for skills:
+person. Install it into one of these locations:
 
 ```sh
-agentctl skills install --user       # ~/.claude/skills, ~/.omp/agent/skills
-agentctl skills install --project    # .claude/skills, .omp/skills, .agents/skills
+agentctl skills install --user       # ~/.agents/skills (default)
+agentctl skills install --project    # .agents/skills in the current directory
 ```
 
 The default is a symlink to the source directory, so a checkout install stays
 live. `agentctl skills path` prints which copy your binary uses; an installed
 tool links its own bundled copy and needs a reinstall after the skill changes.
-`--copy` copies the directory instead, and `--harness omp|claude|agents|all`
-narrows the targets. `agentctl skills status` reports each target and
-`agentctl skills uninstall` removes only what the install created.
+`--copy` copies the directory instead. Use the same scope with
+`agentctl skills status` or `agentctl skills uninstall` to inspect or remove
+the installed skill.
 
 ## Four words worth knowing
 

@@ -247,34 +247,29 @@ Supported keys: `default-agent`, `session.default-mode`,
 
 ```text
 agentctl skills path [--json]
-agentctl skills install [--user|--project] [--harness omp|claude|agents|all] [--copy] [--force] [--json]
-agentctl skills status [--user|--project] [--harness omp|claude|agents|all] [--json]
-agentctl skills uninstall [--user|--project] [--harness omp|claude|agents|all] [--json]
+agentctl skills install [--user|--project] [--copy] [--force] [--json]
+agentctl skills status [--user|--project] [--json]
+agentctl skills uninstall [--user|--project] [--json]
 ```
 
-Installs the bundled Leader skill (`skills/agentctl-leader/SKILL.md`, shipped in
-the wheel as `agentctl/skills/agentctl-leader/`) into the directories a harness
-reads skills from. `path` prints the source directory. The default scope is
-`--user` and the default harness is `all`; passing both `--user` and `--project`
-is a usage error. The neutral `agents` layout has no user path, so `all` covers
-`omp` and `claude` for `--user` and every harness for `--project`.
+The bundled Leader skill lives at `skills/agentctl-leader/SKILL.md` in the
+checkout and at `agentctl/skills/agentctl-leader/` in the wheel. `path` prints
+the source directory.
 
-| harness | `--project` | `--user` |
-| --- | --- | --- |
-| `omp` | `<cwd>/.omp/skills/agentctl-leader` | `~/.omp/agent/skills/agentctl-leader`, or `~/.omp/profiles/$OMP_PROFILE/agent/skills/agentctl-leader` when `OMP_PROFILE` is set |
-| `claude` | `<cwd>/.claude/skills/agentctl-leader` | `~/.claude/skills/agentctl-leader` |
-| `agents` | `<cwd>/.agents/skills/agentctl-leader` | none |
+- `--user` (default) targets `~/.agents/skills/agentctl-leader`.
+- `--project` targets `.agents/skills/agentctl-leader` in the current directory.
 
-The default install is a symlink to the source directory; `--copy` copies it
-instead, and Windows always copies because symlinks need a privilege there.
-`status` reports each target as `linked`, `copied`, `missing`, or `foreign`.
-`uninstall` removes only what `install` created: a symlink resolving into the
-source, or a directory whose only entry is an identical `SKILL.md`.
+The scope options are mutually exclusive. The commands do not manage
+agent-specific skill directories.
 
-An existing file, directory, or symlink pointing elsewhere is refused with
-`skill_target_exists` and exit 5 unless `--force` replaces it. One refused
-target does not stop the others; the command reports every target and exits 5
-when any was refused.
+The default install creates a symlink to the source directory. Use `--copy`
+to copy the directory instead. On Windows, install always copies the directory.
+`status` reports the target as `linked`, `copied`, `missing`, or `foreign`.
+`uninstall` removes a symlink resolving into the source, or a directory whose
+only entry is an identical `SKILL.md`.
+
+An existing file, directory, or symlink pointing elsewhere causes a conflict
+and exit code 5 unless `--force` replaces it.
 
 ## version
 

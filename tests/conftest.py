@@ -171,7 +171,9 @@ if cmd == "interrupt":
 
 if cmd == "read":
     term = args[-1]
-    emit({{"text": "screen for " + term, "complete": True, "how": "screen", "why": None}})
+    shape = state.get("read") or {{"complete": True, "why": None}}
+    emit({{"text": "screen for " + term, "complete": shape["complete"],
+          "how": "screen", "why": shape.get("why")}})
 
 if cmd == "wait":
     if "--children" in args:

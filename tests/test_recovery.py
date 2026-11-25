@@ -133,3 +133,30 @@ def test_rebind_after_directory_move_updates_existing_sessions(
     listed = _run("--workspace", str(moved), "--json", "list", "--no-refresh")
     assert listed.exit_code == 0, listed.output
     assert json.loads(listed.output)["sessions"][0]["cwd"] == str(moved / "backend")
+
+
+def test_read_labels_a_partial_screen_even_without_a_status_word(
+    workspace: Path, fake_hc: Path, monkeypatch
+) -> None:
+    """`complete: false` with `why: null` must still tell the human it is partial.
+
+    Measured on hc 0.1.18: a full-screen program at `idle` returns
+    `complete: false`, `how: screen`, `why: null`. Labelling only on `why`
+    hid the truncation.
+    """
+    _configure(monkeypatch)
+    _run("--workspace", str(workspace), "init")
+    _run("--workspace", str(workspace), "create", "--name", "tui", "--cwd", str(workspace))
+
+    state = json.loads(fake_hc.read_text())
+    state["read"] = {"complete": False, "why": None}
+    fake_hc.write_text(json.dumps(state))
+
+    plain = _run("--workspace", str(workspace), "read", "tui")
+    assert plain.exit_code == 0, plain.output
+    assert "partial: screen only" in plain.output
+
+    machine = _run("--workspace", str(workspace), "--json", "read", "tui")
+    body = json.loads(machine.output)
+    assert body["complete"] is False
+    assert body["why"] is None

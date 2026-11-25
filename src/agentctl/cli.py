@@ -606,7 +606,7 @@ def interrupt(
         Optional[float], typer.Option("--timeout", help="Seconds to wait for the interrupt to land.")
     ] = None,
 ) -> None:
-    """Interrupt the agent in a session (ctrl+c)."""
+    """Interrupt the agent in a session (Herdr's stop key)."""
     state = _state(ctx)
     with _open(state) as (config, store, runtime):
         workspace = _workspace(state, store)
@@ -657,8 +657,11 @@ def read(
             )
         else:
             typer.echo(output.text.rstrip("\n"))
-            if output.why:
-                typer.echo(f"[agentctl] partial: screen only ({output.why})", file=sys.stderr)
+            # `complete` is the fact; `why` only sometimes names a status. A
+            # full-screen program at `idle` is still a truncated history.
+            if not output.complete:
+                reason = f" ({output.why})" if output.why else ""
+                typer.echo(f"[agentctl] partial: screen only{reason}", file=sys.stderr)
 
 
 @app.command()

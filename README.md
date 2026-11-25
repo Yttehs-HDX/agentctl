@@ -109,6 +109,22 @@ is an ordinary Herdr terminal.
 
 Every command accepts `--json`.
 
+## Teaching an agent
+
+`skills/agentctl-leader/SKILL.md` is the Leader skill: when a pool earns its
+cost, how to create, message and wait on Workers, and which exit codes need a
+person. Install it where a harness looks for skills:
+
+```sh
+agentctl skills install --user       # ~/.claude/skills, ~/.omp/agent/skills
+agentctl skills install --project    # .claude/skills, .omp/skills, .agents/skills
+```
+
+The default is a symlink to the bundled copy, so editing the checkout is live.
+`--copy` copies the directory instead, and `--harness omp|claude|agents|all`
+narrows the targets. `agentctl skills status` reports each target and
+`agentctl skills uninstall` removes only what the install created.
+
 ## Four words worth knowing
 
 - `starting`, `idle`, `working`, `waiting`, `completed`, `failed`, `stopped`,
@@ -152,3 +168,4 @@ constraint, not an OS sandbox.
 - [docs/cli.md](docs/cli.md) — full CLI reference
 - [docs/testing.md](docs/testing.md) — how to run the tests
 - [docs/v0.3-report.md](docs/v0.3-report.md) — what this refactor removed and why
+- [skills/agentctl-leader/SKILL.md](skills/agentctl-leader/SKILL.md) — the Leader skill agents load

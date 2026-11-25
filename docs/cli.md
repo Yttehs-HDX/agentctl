@@ -94,12 +94,13 @@ and any terminal labelled with the workspace id but absent from the registry.
 ## list
 
 ```text
-agentctl --workspace PATH list [--all]
+agentctl --workspace PATH list [--all] [--no-refresh]
 ```
 
-Live sessions of this workspace, with a runtime refresh. `--all` adds soft
-deleted history (never refreshed from the runtime). `--no-refresh` skips the
-per-session `hc get`, which is the difference between one call and N calls.
+Every session not deleted from this workspace, with a runtime refresh. `--all`
+adds soft deleted history (never refreshed from the runtime). `--no-refresh`
+skips the per-session `hc get`, which is the difference between one call and N
+calls.
 
 ## create
 
@@ -108,7 +109,7 @@ agentctl --workspace PATH create --name NAME --cwd DIR
         [--agent ID] [--mode shared|worktree] [--base-ref REF] [--wait SECONDS]
 ```
 
-- `--name` unique among live sessions of this workspace.
+- `--name` unique among the sessions not deleted from this workspace.
 - `--cwd` must exist, be a directory, resolve through symlinks, and stay inside
   the workspace root.
 - `--agent` defaults to the workspace default, then the global default; if
@@ -200,7 +201,8 @@ only on its Herdr children. Workers of a previous Leader and parentless
 Workers are not included. Use `wait NAME` for those Workers. Group wait JSON
 includes `scope: "leader_children"` and the `parent` address. An empty
 `children` list is not a workspace-wide result. `reason: "status"` is a
-finished turn. `reason: "timeout"` is a check-in, not an error.
+finished turn. `reason: "timeout"` is a check-in, not an error. `--timeout`
+defaults to `180` seconds for both forms.
 
 ## send
 
@@ -214,6 +216,81 @@ newlines are preserved. Herdr refuses a blocked agent unless `--force`, and a
 finished terminal is an error. `--wait` asks Herdr to wait for the turn the send
 started. `started: false` in the output means the text was typed but no turn
 began, which is a doubt rather than a success.
+
+## keys
+
+```text
+agentctl keys NAME KEY [KEY...]
+```
+
+Presses named keys into the session's terminal through `hc keys`. Use it to
+answer a trust or permission dialog that a `send` cannot clear. Key names are
+Herdr's (`enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl+c`,
+`alt+x`, `f5`, `a`). A name that starts with `-` is refused before Herdr sees
+it, so no key is ever read as an option. The output carries the terminal's
+`status` and `turn` after the keys land.
+
+## interrupt
+
+```text
+agentctl interrupt NAME [--timeout S]
+```
+
+Presses the stop key through `hc interrupt` and reports what happened as `key`
+and `outcome`. The outcomes are `stopped` (it left `working`, or a shell got
+its prompt back), `exited` (the program ended), `still_working` (no change
+within the timeout) and `unknown` (the program reports no status). `--timeout`
+bounds how long Herdr watches for an effect; it defaults to Herdr's own 10
+seconds. Use it to end a turn that is going the wrong way, then `send` a
+correction.
+
+## read
+
+```text
+agentctl read NAME [--lines N] [--follow]
+```
+
+Prints the screen plus `N` lines of history above it, `50` by default. Herdr
+answers with `text`, `complete`, `how` (`screen`, `history` or `stitched`) and
+`why`. `complete: false` means part of the history is missing, which happens
+when the program runs on the alternate screen, such as a full-screen TUI: Herdr
+returns the screen alone. Human output then says `partial: screen only (<why>)`
+on stderr, and JSON carries `complete: false` with `why`. A normal-screen agent
+reads `complete: true` even while it works. Reading a finished session works.
+
+`--follow` reprints the screen whenever it changes, every second, until the
+session stops being live. It refuses to combine with `--json`, which has no
+streaming form.
+
+## status
+
+```text
+agentctl status [NAME] [--no-refresh]
+```
+
+One session, or every session not deleted from the workspace. The status word
+comes from `derive_status`; `--no-refresh` reports the stored value and skips
+the `hc get` per session. With a name, a `last_error` is printed beside the
+status.
+
+## recover
+
+```text
+agentctl recover [NAME]
+```
+
+Without a name, every session not deleted from this workspace, including ones
+already marked `unreachable`. Per session:
+
+| result | meaning |
+| --- | --- |
+| `attached` | Herdr still has a live terminal; the stored address was refreshed |
+| `resumed` | a new terminal runs the agent's resume flag with its native session id |
+| `unrecoverable` | the terminal is gone and no resumable native id exists; the row stays, marked `unreachable` |
+
+A relaunch is not proof of life. `recover` re-derives status right after
+starting the process, so an agent that exits at once is `failed` rather than
+reported as resumed. Recovery never deletes a row.
 
 ## agents
 

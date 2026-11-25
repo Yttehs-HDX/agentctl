@@ -93,7 +93,7 @@ is an ordinary Herdr terminal.
 | `info` | Workspace id, leader id, counts, default agent, runtime status |
 | `rebind NEW` | Move this workspace identity to another directory |
 | `list [--all] [--no-refresh]` | Sessions of this workspace |
-| `create --name N --cwd DIR [--agent ID] [--task TEXT] [--mode shared\|worktree] [--wait S]` | New Worker |
+| `create --name N --cwd DIR [--agent ID] [--task TEXT] [--mode shared\|worktree] [--base-ref REF] [--wait S]` | New Worker |
 | `delete NAME [--keep-worktree]` | Kill the agent, clean the terminal, retire the record |
 | `prune [--dry-run]` | Reclaim agentctl-owned state of soft-deleted sessions |
 | `send NAME TEXT [--force] [--wait] [--timeout S]` | Send text through Herdr |
@@ -106,8 +106,11 @@ is an ordinary Herdr terminal.
 | `leader attach\|detach\|status` | Where this workspace's Leader runs |
 | `agents list\|inspect ID` | Catalog with measured capabilities |
 | `config set\|get\|list` | `default-agent`, `session.default-mode`, `agents.<id>.enabled` |
+| `skills path\|install\|status\|uninstall` | Install the bundled Leader skill |
+| `version` | The agentctl version |
 
-Every command accepts `--json`.
+Every command accepts `--json` except `version`, which prints one plain line.
+`--json` works before or after the command name.
 
 ## Teaching an agent
 

@@ -72,12 +72,19 @@ violating the product requirement that workers outlive the Leader.
   agent may be dropped, so agentctl waits for the first status report
   (`reported: true` or first status word) before sending.
 
-Keys and interrupts (measured on hc 0.1.22 against a scratch core):
+Keys and interrupts (measured on hc 0.1.18 against a scratch core):
 
 ```text
 hc keys --json <terminal> <key>...        -> {"status": "idle"|null, "turn": 0}
-hc interrupt --json [--timeout S] <term>  -> {"key": "ctrl+c", "outcome": "exited"}
+hc interrupt --json [--timeout S] <term>  -> {"key": "esc", "outcome": "stopped"}
 ```
+
+For a program that reports no status, `hc keys` returns `status: null`; the key
+still lands. `outcome` is `stopped`, `exited`, `still_working` or `unknown`,
+per `hc schema`. `key` names the stop key Herdr actually pressed, which depends
+on the program: `ctrl+c` for a plain program, `esc` for omp. Measured on omp,
+`{"key": "esc", "outcome": "stopped"}` while the turn was `working`, and the
+same answer when the agent was already `done`.
 
 Key names: `enter`, `esc`, `tab`, `up`, `down`, `left`, `right`, `ctrl+c`,
 `alt+x`, `f5`, `a`. A key name never starts with `-`; agentctl rejects those at
@@ -88,9 +95,15 @@ the terminal directly (no readiness wait); a finished terminal raises
 `hc read --json` = `{text, complete, how, why}`.
 
 - `how` is `screen`, `history`, or `stitched`.
-- When the app is `working`/`blocked`/`error`, history reads return only the
-  screen and set `complete: false` with `why` = that status. This is why
-  `agentctl read` distinguishes "partial" output.
+- `complete: false` means part of what was asked for may be missing. Measured,
+  the trigger is the alternate screen: a program that entered it with
+  `\033[?1049h` returns `how: "screen"`, `complete: false`, whatever its status
+  word, and `why` is `"working"`, `"blocked"` or `"error"` when it reports one
+  of those. A normal-screen program returns `complete: true`, `how: "history"`,
+  even while it reports `working`. A word-reporting harness printing 200 lines
+  and reporting `working` still read `complete: true`.
+- This is why `agentctl read` distinguishes partial output: a full-screen TUI
+  cannot be scrolled by Herdr, so history is the screen and nothing else.
 - Reading a finished terminal works (`how: "history"`).
 
 `hc wait --json <t>` returns
@@ -227,14 +240,12 @@ agentctl v0.1 has no `--on` flag: `create_terminal` never passes it.
 - **orphan detection**: a terminal labelled `agentctl.workspace=<id>` without a
   registry row shows up under `info` → `orphans`.
 
----
-
-# Herdr capabilities agentctl relies on (v0.3)
+## Herdr capabilities agentctl relies on (v0.3)
 
 Measured on hc 0.1.18 in a scratch core (`HC_SESSION=lab2`-`hv5`), with a scripted
 harness that emits real OSC 7501 status. Everything here is delegated to Herdr.
 
-## Parentage and survival
+### Parentage and survival
 
 ```sh
 hc run --bg --name worker --parent t1 --outlive-parent -- <cmd>
@@ -247,7 +258,7 @@ from inside another one inherits `die_with_parent: true`.
 This pair is the whole reason a Worker outlives its Leader while still being a
 child for Herdr's notifications.
 
-## Native child notes
+### Native child notes
 
 With a real parent, Herdr types notes into that parent's input, for example:
 
@@ -261,7 +272,7 @@ confirmed by [issue #176](https://github.com/herdrdev/herdr-core/issues/176),
 whose fix ([PR #177](https://github.com/herdrdev/herdr-core/pull/177)) is open
 and not merged on 0.1.18.
 
-## Send
+### Send
 
 ```text
 hc send --json <t> <text>              -> {"started": true, "status": "idle", "turn": 0}
@@ -276,7 +287,7 @@ hc send --json --wait <t> <text>       -> {"started": …, "wait": {"reason":"no
 - `--wait` returns the turn's outcome; `reason: "not_started"` means no turn
   began, which is the honest form of a delivery doubt.
 
-## Turns and waits
+### Turns and waits
 
 OSC 7501 from a program is `state=<word>:app=<name>` terminated by ST. A script
 emitting `state=working` then `state=done` produced:
@@ -299,19 +310,21 @@ Measured: a child that reported `working → done` and sent nothing to its paren
 made `wait --children any` return with `reason: "status"` and the child's `turn`
 bumped. Herdr decides, from its own counter, with no hook and no screen parsing.
 
-## Labels and names
+### Labels and names
 
 - `--label k=v`, `hc ls --label k=v`, `hc label <t> k=v`. agentctl uses
   `agentctl.workspace`, `agentctl.session` and `agentctl.role`.
 - Names are `1-32` of `a-z 0-9 - _ .` and must not be shaped like an address
   (`t7` is rejected). agentctl rejects such a session name at its own boundary.
 
-## What this means for agentctl
+### What this means for agentctl
 
 | Need | Delegated call |
 | --- | --- |
 | Run and keep a Worker | `hc run --bg --parent … --outlive-parent` |
 | Deliver work | `hc send` |
+| Answer a dialog | `hc keys` |
+| End a wrong turn | `hc interrupt` |
 | Refuse a blocked agent | `hc send` guard |
 | Know a turn started | `hc send --wait` → `started` |
 | Know a turn ended | `hc wait --children` → `reason: "status"` |

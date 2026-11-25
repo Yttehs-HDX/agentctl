@@ -29,6 +29,11 @@ cli.py                     parse args, resolve the workspace, render one result
 └── errors.py              every failure has a code, hint and exit status
 ```
 
+Four modules sit outside those packages: `paths.py` resolves the config and
+state directories, `skills.py` installs the bundled Leader skill, `clock.py`
+holds the one timestamp format stored rows use, and `__init__.py` carries the
+version.
+
 Rules kept by the code:
 
 - The CLI never issues SQL and never builds an `hc` command.
@@ -54,22 +59,6 @@ only adds what Herdr has no concept of.
 | Workspace identity, path migration | agentctl | `workspace/` |
 | Which terminal is the Leader | agentctl | `leader/` |
 | Worker names, agents, worktrees, native ids | agentctl | `session/` |
-
-```text
-cli.py                    parse args, resolve the workspace, render one result
-├── workspace/             canonical paths, stable ids, discovery
-├── leader/                binding: workspace -> terminal + native session
-├── session/
-│   ├── service.py         create, delete, get, list, recover, prune
-│   ├── lifecycle.py       runtime facts -> agentctl status (pure)
-│   ├── messaging.py       send, keys, interrupt, read, waits
-│   └── worktree.py        one git worktree per session
-├── agents/                declarative launch/resume flags per agent
-├── runtime/
-│   ├── base.py            RuntimeAdapter interface
-│   └── herdr_core.py      the only module that knows `hc`
-└── storage/               workspaces, sessions, the leader binding
-```
 
 ## Leader binding
 
@@ -269,8 +258,9 @@ action, and even then the row is soft-deleted.
   rather than claiming delivery.
 - `keys` and `interrupt` expose `hc keys` and `hc interrupt`. Key names starting
   with `-` are rejected at the service boundary.
-- `read` reports `complete`/`why` from Herdr, so partial history (a busy agent, a
-  full-screen app) is labelled rather than silently truncated.
+- `read` reports `complete`/`why` from Herdr. A full-screen program returns
+  `complete: false` with the screen alone, so partial history is labelled rather
+  than silently truncated.
 
 ## Worktree policy
 

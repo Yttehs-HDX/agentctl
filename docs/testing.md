@@ -6,6 +6,10 @@ uv pip install -e '.[dev]'
 .venv/bin/python -m pytest
 ```
 
+`pythonpath = ["."]` in `pyproject.toml` lets the tests import
+`tests.conftest`, so both `pytest` and `python -m pytest` collect from the
+project root. Running from another directory breaks that import.
+
 The suite is hermetic: every test runs with `AGENTCTL_HOME` pointed at a
 temporary directory, so the real `~/.config/agentctl` is never touched, and the
 runtime tests use a fake `hc` script (see `tests/conftest.py`) instead of a live
@@ -29,6 +33,9 @@ Herdr Core.
 | `test_cli.py` | JSON envelope and schema, `--json` argv handling, usage errors |
 | `test_discovery.py` | workspace auto-detection: precedence, nesting, symlinks, failures |
 | `test_leader.py` | binding: attach, refusal, Worker takeover guard, staleness from Herdr |
+| `test_paths.py` | `AGENTCTL_HOME`, XDG, and the Windows config/state split |
+| `test_skills.py` | bundled skill discovery, install targets, CLI wiring |
+
 `conftest.py` supplies:
 
 - `isolated_home` (autouse) — temporary `AGENTCTL_HOME`.
@@ -47,6 +54,7 @@ session, and agentctl its own home:
 export HC_SESSION=hv3 AGENTCTL_HOME=/tmp/hv3
 cd /tmp/project
 agentctl setup && agentctl init
+agentctl config set default-agent omp   # setup sets no default when several agents exist
 
 # A Leader inside Herdr
 tc=$(hc run --bg --json --no-parent --name lead -- sleep 900 | jq -r .address)
@@ -64,11 +72,14 @@ agentctl leader status         # live: no; the binding is stale
 tc2=$(hc run --bg --json --no-parent --name lead2 -- sleep 900 | jq -r .address)
 agentctl leader attach --terminal "$tc2" --takeover
 agentctl list                  # the same Workers
-agentctl wait --all --timeout 30
+agentctl wait --all --timeout 30   # no children: these Workers still belong to the old Leader
+agentctl wait w1 --timeout 30      # wait on them by name
 ```
 
 Measured on hc 0.1.18: the Workers survive the Leader's terminal, a new Leader
-attaches, and `wait --all` is `hc wait --children all`.
+attaches, and `wait --all` is `hc wait --children all`. A takeover does not
+reparent the old Leader's Workers, so the group wait sees none of them and says
+so instead of returning a workspace-wide result.
 
 ## Manual end-to-end
 

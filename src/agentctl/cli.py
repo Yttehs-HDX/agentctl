@@ -1247,10 +1247,39 @@ def main() -> None:
         _print_error(AgentctlError(str(exc) or type(exc).__name__), json_mode)
 
 
+def _panel_message(lines: list[str]) -> str | None:
+    """The reason inside Click's `╭─ Error ─╮` panel, joined across wraps.
+
+    The panel draws with `│` on both sides. A header line carries `─`, a border
+    line carries `╭` or `╰`. Everything else is the message, which may span
+    several lines when the terminal is narrow.
+    """
+    inside = False
+    parts: list[str] = []
+    for line in lines:
+        if "─" in line and "│" not in line:
+            inside = "Error" in line
+            continue
+        if not inside or not line.startswith("│"):
+            continue
+        if "╰" in line or "╭" in line:
+            continue
+        content = line.strip("│").strip()
+        if content:
+            parts.append(content)
+    return " ".join(parts) or None
+
+
 def _print_usage_error(text: str) -> None:
-    """Turn Click's usage error into the same JSON envelope as our errors."""
+    """Turn Click's usage error into the same JSON envelope as our errors.
+
+    Click prints the reason inside a rich panel, which wraps at the terminal
+    width. `Missing argument 'session'.` becomes two lines in a narrow
+    terminal, so the panel's content lines are joined before one is taken as
+    the message.
+    """
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    message = next((line.strip("│ ") for line in lines if line.startswith("│")), None)
+    message = _panel_message(lines)
     if message is None:
         message = next(
             (line.removeprefix("Error:").strip() for line in reversed(lines) if line.startswith("Error:")),

@@ -149,3 +149,19 @@ def test_agents_inspect_unknown_id_fails(monkeypatch, capsys) -> None:
         cli.main()
     assert exc.value.code == 6
     assert "nope" in capsys.readouterr().err
+
+
+def test_json_usage_error_survives_a_narrow_terminal(monkeypatch, capsys) -> None:
+    """Click wraps its error panel at the terminal width.
+
+    At `COLUMNS=30` the reason `Missing argument 'session'.` reaches the parser
+    as two lines. Taking only the first line dropped the argument name, so the
+    machine-readable message said `Missing argument` and nothing else.
+    """
+    monkeypatch.setenv("COLUMNS", "30")
+    monkeypatch.setattr(sys, "argv", ["agentctl", "--json", "send"])
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+    assert exc.value.code == 2
+    body = json.loads(capsys.readouterr().err)
+    assert body["error"]["message"] == "Missing argument 'session'."

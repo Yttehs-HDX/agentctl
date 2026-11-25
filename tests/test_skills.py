@@ -15,6 +15,12 @@ from agentctl.cli import app
 
 runner = CliRunner()
 
+# `--help` is rendered at the terminal width. Rich truncates option names in a
+# narrow terminal (`--nam…`), which has nothing to do with whether the option
+# exists. Pin a width wide enough to keep every name whole, so the assertion
+# tests the CLI surface and not the runner's screen.
+_WIDE = {"COLUMNS": "200"}
+
 
 def _frontmatter(text: str) -> dict[str, str]:
     _, front, _rest = text.split("---", 2)
@@ -272,12 +278,12 @@ def test_every_skill_command_and_option_exists_in_the_cli() -> None:
     lines = _skill_command_lines(markdown)
     assert lines, "no fenced sh command lines found in the skill"
 
-    root = runner.invoke(app, ["--help"])
+    root = runner.invoke(app, ["--help"], env=_WIDE)
     assert root.exit_code == 0, root.output
 
     for line in lines:
         command, options = _parse_command(line)
-        result = runner.invoke(app, [*command, "--help"])
+        result = runner.invoke(app, [*command, "--help"], env=_WIDE)
         assert result.exit_code == 0, f"{line}\n{result.output}"
         for option in options:
             if option in _GLOBAL_WITH_VALUE or option in _GLOBAL_FLAGS:

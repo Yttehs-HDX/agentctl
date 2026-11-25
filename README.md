@@ -120,7 +120,9 @@ agentctl skills install --user       # ~/.claude/skills, ~/.omp/agent/skills
 agentctl skills install --project    # .claude/skills, .omp/skills, .agents/skills
 ```
 
-The default is a symlink to the bundled copy, so editing the checkout is live.
+The default is a symlink to the source directory, so a checkout install stays
+live. `agentctl skills path` prints which copy your binary uses; an installed
+tool links its own bundled copy and needs a reinstall after the skill changes.
 `--copy` copies the directory instead, and `--harness omp|claude|agents|all`
 narrows the targets. `agentctl skills status` reports each target and
 `agentctl skills uninstall` removes only what the install created.
